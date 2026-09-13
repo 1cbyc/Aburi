@@ -1,5 +1,7 @@
+import { existsSync } from "node:fs"
 import { readFile } from "node:fs/promises"
 import { createRequire } from "node:module"
+import { fileURLToPath } from "node:url"
 import type { ParseError, ParseResult, SourceFile } from "@aburi/types"
 import { Language, Parser, type Tree } from "web-tree-sitter"
 import { extractImports } from "./imports"
@@ -7,15 +9,59 @@ import { extractImports } from "./imports"
 const nodeRequire = createRequire(import.meta.url)
 
 /**
- * Absolute filesystem paths of the WASM runtime and the two grammar wasms this plugin
- * needs. `createRequire.resolve` picks the right on-disk paths regardless of how the
- * dependency is hoisted (pnpm's per-package `node_modules`, npm's flat tree, etc.).
+ * Absolute filesystem path of the WASM runtime. `createRequire.resolve` picks the right
+ * on-disk path regardless of how the dependency is hoisted (pnpm's per-package
+ * `node_modules`, npm's flat tree, etc.).
  */
 const RUNTIME_WASM_PATH = nodeRequire.resolve("web-tree-sitter/web-tree-sitter.wasm")
-const TYPESCRIPT_WASM_PATH = nodeRequire.resolve(
-  "@vscode/tree-sitter-wasm/wasm/tree-sitter-typescript.wasm",
+
+/**
+ * Absolute filesystem paths of the two grammar wasms this plugin parses with.
+ *
+ * They are vendored into the package's own `wasm/` by `scripts/copy-grammars.mjs` rather
+ * than resolved out of `@vscode/tree-sitter-wasm`: this plugin reads two of the grammars
+ * that package ships, npm cannot install part of a tarball, and keeping it a runtime
+ * dependency would put all the rest on every consumer's disk.
+ *
+ * Two constraints hold the shape of these two lines in place.
+ *
+ * `../wasm/` has to resolve from both the published `dist/index.mjs` and this file under
+ * `src/`, which it does because both sit exactly one directory below the package root —
+ * that is why the script copies to the root and not into `dist/`. Moving either deeper
+ * breaks the path.
+ *
+ * The specifier has to stay a literal. Vite/Rollup, webpack and esbuild rewrite
+ * `new URL(<literal>, import.meta.url)` into an emitted asset, and a template literal is
+ * the one form none of them touch. Building these through a helper therefore left a
+ * consumer who re-bundles this package (`@vercel/ncc`, esbuild into a container) with
+ * `import.meta.url` pointing at their own bundle and no `wasm/` beside it.
+ */
+const TYPESCRIPT_WASM_PATH = fileURLToPath(
+  new URL("../wasm/tree-sitter-typescript.wasm", import.meta.url),
 )
-const TSX_WASM_PATH = nodeRequire.resolve("@vscode/tree-sitter-wasm/wasm/tree-sitter-tsx.wasm")
+const TSX_WASM_PATH = fileURLToPath(new URL("../wasm/tree-sitter-tsx.wasm", import.meta.url))
+
+/**
+ * Refuse to load at all when the grammars are not on disk.
+ *
+ * `require.resolve` used to buy this for free: a missing grammar threw while this module
+ * was being imported, and `plugin-loader.ts` turned that into a `CliError` naming the
+ * plugin. Reading the files lazily instead defers the failure to the `readFile` in
+ * `loadLanguage`, which lands in `parseFile`'s per-file catch — where an ENOENT on the
+ * grammar is indistinguishable from one source file the parser choked on. The scan then
+ * runs to completion, writes an IR with zero Symbols, and exits 3: the code CI gates read
+ * as a healthy no-findings run. A missing dependency has to stop the run instead.
+ */
+for (const wasmPath of [TYPESCRIPT_WASM_PATH, TSX_WASM_PATH]) {
+  if (!existsSync(wasmPath)) {
+    throw new Error(
+      `@aburi/lang-typescript: no grammar wasm at ${wasmPath}. That directory is build ` +
+        "output rather than source: run `pnpm --filter @aburi/lang-typescript build` in a " +
+        "checkout of this repository, or reinstall the package, whose published tarball " +
+        "ships it.",
+    )
+  }
+}
 
 /**
  * File-extension → grammar-wasm-path lookup used by parseFile to pick the right Language.

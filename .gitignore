@@ -6,6 +6,14 @@ dist/
 out/
 *.tsbuildinfo
 
+# tree-sitter grammars vendored from the @vscode/tree-sitter-wasm devDependency at build
+# time by packages/lang-typescript/scripts/copy-grammars.mjs
+packages/lang-typescript/wasm/
+
+# Sandbox that packages/e2e-integration/test/vendored-grammars.test.ts runs the
+# vendoring script in, so the real wasm/ stays untouched while tests run in parallel
+packages/lang-typescript/.grammar-sandbox-*/
+
 # Turborepo
 .turbo/
 

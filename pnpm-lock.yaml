@@ -202,18 +202,27 @@ importers:
       '@aburi/cli':
         specifier: workspace:*
         version: link:../cli
+      '@aburi/config':
+        specifier: workspace:*
+        version: link:../config
       '@aburi/core':
         specifier: workspace:*
         version: link:../core
       '@aburi/diff':
         specifier: workspace:*
         version: link:../diff
+      '@aburi/effects-drizzle':
+        specifier: workspace:*
+        version: link:../effects-drizzle
       '@aburi/effects-nest':
         specifier: workspace:*
         version: link:../effects-nest
       '@aburi/effects-prisma':
         specifier: workspace:*
         version: link:../effects-prisma
+      '@aburi/effects-trpc':
+        specifier: workspace:*
+        version: link:../effects-trpc
       '@aburi/framework-express':
         specifier: workspace:*
         version: link:../framework-express
@@ -226,6 +235,9 @@ importers:
       '@aburi/framework-react':
         specifier: workspace:*
         version: link:../framework-react
+      '@aburi/github-action':
+        specifier: workspace:*
+        version: link:../github-action
       '@aburi/lang-typescript':
         specifier: workspace:*
         version: link:../lang-typescript
@@ -489,9 +501,6 @@ importers:
       '@aburi/types':
         specifier: workspace:*
         version: link:../types
-      '@vscode/tree-sitter-wasm':
-        specifier: ^0.3.1
-        version: 0.3.1
       web-tree-sitter:
         specifier: ^0.26.10
         version: 0.26.10
@@ -499,6 +508,9 @@ importers:
       '@types/node':
         specifier: ^26.0.1
         version: 26.0.1
+      '@vscode/tree-sitter-wasm':
+        specifier: ^0.3.1
+        version: 0.3.1
       tsdown:
         specifier: ^0.22.3
         version: 0.22.3(tsx@4.22.4)(typescript@6.0.3)

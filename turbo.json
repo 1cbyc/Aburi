@@ -4,15 +4,27 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/tsconfig.base.json"],
       "outputs": ["dist/**"]
+    },
+    "@aburi/lang-typescript#build": {
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/tsconfig.base.json"],
+      "outputs": ["dist/**", "wasm/**"]
     },
     "test": {
       "dependsOn": ["^build"],
       "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/schema/**"],
       "outputs": []
     },
+    "@aburi/lang-typescript#test": {
+      "dependsOn": ["^build", "@aburi/lang-typescript#build"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/schema/**"],
+      "outputs": []
+    },
     "typecheck": {
       "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/tsconfig.base.json"],
       "outputs": []
     }
   }
