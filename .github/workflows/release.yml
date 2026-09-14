@@ -32,6 +32,12 @@ jobs:
     # confusing telemetry.
     if: github.repository == 'kage1020/Aburi'
     runs-on: ubuntu-latest
+    outputs:
+      # "true" only on the run that actually published — a run that merely
+      # opened or refreshed the Version Packages PR reports "false". This is
+      # what the docs deploy below waits on, so the site ships with the
+      # release rather than with every merge into `main`.
+      published: ${{ steps.changesets.outputs.published }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -78,6 +84,7 @@ jobs:
       #   - The publisher entry has no environment restriction, or matches an
       #     `environment:` we set on this job (currently unset).
       - name: Create Release PR or Publish
+        id: changesets
         uses: changesets/action@v1
         with:
           version: pnpm changeset version
@@ -92,3 +99,20 @@ jobs:
           createGithubReleases: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # The documentation describes the packages, so it goes live when the packages
+  # do — not when the merge that will eventually become a release lands. Gating
+  # on `published` also means the run that only opens the Version Packages PR
+  # (whose diff is version numbers and changelogs, on packages nobody can
+  # install yet) deploys nothing.
+  #
+  # A documentation change that should not wait for a release can still be
+  # shipped on its own: run the Docs workflow from the Actions tab.
+  docs:
+    name: docs
+    needs: release
+    if: needs.release.outputs.published == 'true'
+    uses: ./.github/workflows/docs.yml
+    # The called workflow needs CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID;
+    # `inherit` avoids restating them here and in every other caller.
+    secrets: inherit
