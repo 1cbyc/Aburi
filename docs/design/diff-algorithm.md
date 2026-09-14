@@ -695,6 +695,32 @@ componentDiff = {
 }
 ```
 
+Component identity is `id`. **Which fields make a Component `changed` and which fields the
+`delta` summarises are two different questions**, and answering them with one list is a bug this
+document once invited: a Component is `changed` when *any* field differs, while `delta` names
+only the three axes a reviewer scans for architectural movement.
+
+Reading the three booleans as the definition of change means a renamed component, an added
+language, or a new description produces `componentsChanged: 0` and an empty `changed[]` — and
+with no entry there is not even a before/after pair for the Markdown layer to render. The delta
+needs no fourth boolean to fix that: `changed[]` already carries `before` and `after`, so a
+consumer renders a name change by comparing them, and an entry whose three booleans are all
+`false` is well-formed and means "something outside those axes moved".
+
+Comparison is over the whole record, so a field added to `v1` later counts without this section
+being revisited, and two spellings of "no value" are reduced to one before it: a `description`
+that is `null` compares equal to an absent key, and a `publicApi` / `frameworks` that is `[]`
+compares equal to an absent key.
+
+Those two rules are scoped to the fields that license them, not to a class. `description` is
+Class A (ir-schema.md §1.1), where a reader MUST treat an absent key as `null`. `publicApi` and
+`frameworks` are Class B, whose *own* writer rule is "omitted when empty" — which is what makes
+`[]` a non-conforming spelling of absence. Class B does not say that in general: §1.1 is explicit
+that there "absent" and "empty" are different facts, with `stats.lspEnrichment.hintsRejected` as
+its own counterexample. So the one future shape that forces a revisit here is a Class B
+`Component` field whose *presence* is the information — dropping that by shape would swallow a
+real difference. Every other new field compares as written, which is the case that needs nothing.
+
 ### 6.2 Dependency diff
 
 ```

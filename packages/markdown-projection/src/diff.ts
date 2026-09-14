@@ -1,4 +1,5 @@
 import type {
+  Component,
   Dependency,
   DependencyUnknown,
   DiffResult,
@@ -16,7 +17,7 @@ import type {
   SymbolUnknown,
 } from "@aburi/types"
 import { renderSymbolBlock } from "./component"
-import { compareStrings, isSymbolIdEndpoint, requireDropReason } from "./format"
+import { compareStrings, inlineCodeValue, isSymbolIdEndpoint, requireDropReason } from "./format"
 
 /**
  * §6 — `out/diff.md`. Sections are emitted in the fixed importance order
@@ -884,15 +885,120 @@ function renderComponentChanges(diff: DiffResult): string[] {
   if (diff.components.changed.length > 0) {
     rows.push("### Changed")
     for (const ch of diff.components.changed) {
-      const flags: string[] = []
-      if (ch.delta.rootsChanged) flags.push("roots")
-      if (ch.delta.publicApiChanged) flags.push("publicApi")
-      if (ch.delta.frameworksChanged) flags.push("frameworks")
-      rows.push(`- \`${ch.after.id}\`: ${flags.join(", ")}`)
+      const fields = changedComponentFields(ch.before, ch.after)
+      // Reachable without a malformed artifact: the key sweep below names an unknown field but
+      // cannot say what it is, and two documents can differ in a field neither this version nor
+      // the sweep's normalization recognises. Naming the component alone is the honest row —
+      // the artifact counted a change this renderer cannot describe.
+      rows.push(
+        fields.length === 0 ? `- \`${ch.after.id}\`` : `- \`${ch.after.id}\`: ${fields.join(", ")}`,
+      )
     }
     rows.push("")
   }
   return rows
+}
+
+/**
+ * The fields that actually differ between the two revisions of one Component, read from
+ * `before` / `after` rather than from `delta`.
+ *
+ * `delta` summarises three axes (roots, publicApi, frameworks); a Component also carries a
+ * display name, a language list and a description, and a change to those leaves all three
+ * booleans `false` (diff-algorithm.md §6.1). Those entries did not exist before that section was
+ * fixed, so a renderer reading only the booleans had never had to draw one — and would draw it
+ * as a row whose colon is followed by nothing. Both halves moved together for that reason.
+ *
+ * Scalars carry their before → after inline, because that *is* the change, through a code span
+ * no value can break out of (`inlineCodeValue`): both are free-form user text out of the config
+ * file, and this row reaches a PR comment body through `@aburi/github-action`. The list-valued
+ * fields name themselves and leave the values to the artifact, which is what the surrounding
+ * section has always done. A comma inside a scalar is why the values are spanned rather than
+ * bare: the span is what tells it apart from the `, ` between fields.
+ *
+ * The six named fields are every field of `Component` except `id`; the sweep after them is what
+ * keeps that from being a claim this function cannot honour. `aburi.ir.v1` admits additive
+ * fields and `readIR` does not reject the ones it does not know (`assertIRIntegrity` types the
+ * declared keys without refusing extras), so an IR written by a newer Aburi reaches an older CLI
+ * intact — and `diffComponents` compares the whole record, so it will emit an entry for a field
+ * this function has never heard of. It gets named rather than dropped.
+ */
+function changedComponentFields(before: Component, after: Component): string[] {
+  const fields: string[] = []
+  if (before.name !== after.name) {
+    fields.push(`name (${renderValue(before.name)} → ${renderValue(after.name)})`)
+  }
+  if (!sameList(before.roots, after.roots)) fields.push("roots")
+  if (!sameList(before.publicApi ?? [], after.publicApi ?? [])) fields.push("publicApi")
+  if (!sameList(before.languages, after.languages)) fields.push("languages")
+  if (!sameList(before.frameworks ?? [], after.frameworks ?? [])) fields.push("frameworks")
+  // Class A (ir-schema.md §1.1): an absent key and `null` are the same answer, so the `??`
+  // is what keeps an older document that omits the key from reading as a description removal.
+  const beforeDescription = before.description ?? null
+  const afterDescription = after.description ?? null
+  if (beforeDescription !== afterDescription) {
+    fields.push(
+      `description (${renderDescription(beforeDescription)} → ${renderDescription(afterDescription)})`,
+    )
+  }
+  fields.push(...unknownChangedFields(before, after))
+  return fields
+}
+
+/**
+ * Field names the two revisions disagree on that `changedComponentFields` has no rendering for:
+ * a `Component` key added to `aburi.ir.v1` after this version was built.
+ *
+ * Compared by `JSON.stringify` rather than by the diff layer's canonical serializer, which lives
+ * in `@aburi/core` and is not a dependency of this package. The difference only shows on a value
+ * whose key order or Unicode form differs between the two sides, and it shows as a field named
+ * that a reader can check — noise, where saying nothing would be silence. Nothing reaches here
+ * unless `diffComponents` already decided this component changed.
+ */
+function unknownChangedFields(before: Component, after: Component): string[] {
+  // Widened through `unknown`: the keys being read are by definition not on `Component`.
+  const beforeRecord = before as unknown as Record<string, unknown>
+  const afterRecord = after as unknown as Record<string, unknown>
+  const names = new Set<string>()
+  for (const key of [...Object.keys(beforeRecord), ...Object.keys(afterRecord)]) {
+    if (key === "id" || RENDERED_COMPONENT_FIELDS.has(key)) continue
+    if (normalizeUnknown(beforeRecord[key]) !== normalizeUnknown(afterRecord[key])) names.add(key)
+  }
+  return [...names].sort(compareStrings)
+}
+
+/** Absence, `null` and `[]` all read as "no value", matching the diff layer's normalization. */
+function normalizeUnknown(value: unknown): string {
+  // `absent` unquoted is unreachable as JSON: a string serializes with its quotes.
+  if (value === undefined || value === null) return "absent"
+  if (Array.isArray(value) && value.length === 0) return "absent"
+  return JSON.stringify(value)
+}
+
+const RENDERED_COMPONENT_FIELDS = new Set<string>([
+  "name",
+  "roots",
+  "publicApi",
+  "languages",
+  "frameworks",
+  "description",
+])
+
+/**
+ * A description as a row cell. `null` and `""` are different answers from the config author —
+ * "no description" against "a description that is empty" — so they read differently here.
+ */
+function renderDescription(description: string | null): string {
+  return description === null ? "none" : renderValue(description)
+}
+
+/** A free-form scalar as a row cell. Empty is spelled, because an empty code span is not one. */
+function renderValue(value: string): string {
+  return value === "" ? "(empty)" : inlineCodeValue(value)
+}
+
+function sameList(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((entry, i) => entry === b[i])
 }
 
 /**
