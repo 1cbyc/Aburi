@@ -84,27 +84,44 @@ for the plugin contracts and a walkthrough.
 
 [aburi.kage1020.com](https://aburi.kage1020.com) is the VitePress site under
 [`docs/`](docs/), served by a Cloudflare Worker configured in
-[`docs/wrangler.jsonc`](docs/wrangler.jsonc). Cloudflare's git integration
-watches the repository directly — there is no deploy workflow in
-`.github/workflows/`, so changing CI will not change how the site ships.
+[`docs/wrangler.jsonc`](docs/wrangler.jsonc). Production is deployed from
+[`.github/workflows/docs.yml`](.github/workflows/docs.yml); previews still come
+from Cloudflare's git integration, which watches the repository directly.
 
-Pushing to `main` deploys production. Pushing to any other branch uploads a
-*version* instead: the site is built and reachable at a preview URL, but no
-traffic moves off the deployed version. Cloudflare comments that URL on the
-pull request and rewrites the comment on every push, so the link in a review
-always points at the commit being reviewed.
+**Production ships with the release, not with the merge.**
+[`release.yml`](.github/workflows/release.yml) calls the docs workflow only on
+the run where changesets actually published to npm, so the site never documents
+a version that cannot be installed yet. A documentation fix that should not
+wait for the next release can be shipped on its own by running the **Docs**
+workflow from the Actions tab.
 
-Two things make that work, one in this repository and one outside it:
+Pushing to a branch other than `main` uploads a *version*: the site is built
+and reachable at a preview URL, but no traffic moves off the deployed version.
+Cloudflare comments that URL on the pull request and rewrites the comment on
+every push, so the link in a review always points at the commit being reviewed.
+
+Two things make the previews work, one in this repository and one outside it:
 
 - `preview_urls` in [`docs/wrangler.jsonc`](docs/wrangler.jsonc). It is set
   explicitly because the default follows `workers_dev`, and because Wrangler
   overwrites the dashboard toggle on every deploy.
 - **Workers & Pages → aburi → Settings → Build → Branch control**: *Builds for
   non-production branches* must be enabled, or pull requests get no preview at
-  all. This is the only step that cannot live in the repository.
+  all.
+
+And two make the release-time deploy work, neither of which lives in the
+repository:
+
+- On that same **Branch control** screen, builds for the **production branch**
+  must be *disabled*. Left on, every push to `main` deploys the site the moment
+  it merges, and the release-time deploy is only a second deploy of something
+  already live — which is the coupling this arrangement exists to break.
+- Two repository secrets, because Cloudflare has no equivalent of the OIDC
+  trusted publishing the npm release leans on: `CLOUDFLARE_API_TOKEN` (a token
+  with *Workers Scripts: Edit* on this account) and `CLOUDFLARE_ACCOUNT_ID`.
 
 Because this is a monorepo, a pull request that touches no documentation still
-triggers a docs build. **Build → Build watch paths** can narrow that to
+triggers a preview build. **Build → Build watch paths** can narrow that to
 `docs/*` if the noise becomes a problem.
 
 ## Conventions
@@ -123,4 +140,4 @@ triggers a docs build. **Build → Build watch paths** can narrow that to
 
 Releases are cut from `main` via [changesets](https://github.com/changesets/changesets):
 merging the release PR created by the release workflow publishes the packages
-to npm.
+to npm, and that same run deploys the docs site (see above).
