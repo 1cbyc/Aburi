@@ -1,3 +1,4 @@
+import { serializeCanonical } from "@aburi/core"
 import type {
   Component,
   ComponentDiff,
@@ -18,12 +19,18 @@ import type {
  * reaching this export directly owns the obligation, because the lookup map here is
  * last-write-wins and a repeat is lost rather than reported.
  *
- * Component identity is `id`; when a Component is present in both
- * base and head with the same id, the three delta booleans describe which axes actually
- * moved (roots reshuffle, public API globs, or framework hint list). `modified` deltas
- * are intentionally absent from this diff (diff-algorithm.md §5.2.3): fields are reported as before/after
- * pairs via the `changed[]` entries so consumers can render them without stringifying
- * arrays.
+ * Component identity is `id`; when a Component is present in both base and head with the same
+ * id, *any* field that differs makes it `changed` — the whole object is compared, not the three
+ * axes the delta names. Those two questions were conflated once and a display name, a language,
+ * or a description could be rewritten with the diff reporting `componentsChanged: 0` and an
+ * empty `changed[]`, which left the projection layer without even a before/after pair to render
+ * (#100). The delta booleans stay exactly what they were — a summary of the three axes a
+ * reviewer scans for architectural movement — and a `changed[]` entry with all three `false` is
+ * a well-formed answer meaning "something else about this component moved", not a bug.
+ *
+ * `modified` deltas are intentionally absent from this diff (diff-algorithm.md §5.2.3): fields
+ * are reported as before/after pairs via the `changed[]` entries so consumers can render them
+ * without stringifying arrays.
  */
 export function diffComponents(
   base: readonly Component[],
@@ -50,7 +57,7 @@ export function diffComponents(
       baseComp.frameworks ?? [],
       headComp.frameworks ?? [],
     )
-    if (rootsChanged || publicApiChanged || frameworksChanged) {
+    if (!componentsEqual(baseComp, headComp)) {
       changed.push({
         before: baseComp,
         after: headComp,
@@ -245,6 +252,44 @@ function compareDependencies(a: Dependency, b: Dependency): number {
   const keyA = dependencyKey(a)
   const keyB = dependencyKey(b)
   return keyA < keyB ? -1 : keyA > keyB ? 1 : 0
+}
+
+/**
+ * Whether two Components are the same record, over every field the document carries rather
+ * than an enumerated list. An enumerated list is what produced #100, and `v1` admits additive
+ * fields (ir-schema.md §15), so a list written today would go stale the same way the next time
+ * one is added.
+ *
+ * Equality is `@aburi/core`'s canonical serialization — the codebase's one answer to "are these
+ * two JSON values the same", the one fingerprints are built on — over a normalized form, so
+ * key order and Unicode spelling cannot manufacture a change. It throws `non-plain-json` on a
+ * value JSON cannot carry, which for a Component read out of a validated document cannot
+ * happen; a library caller assembling one by hand gets the loud failure rather than a silent
+ * comparison of `"{}"` against `"{}"`.
+ */
+function componentsEqual(a: Component, b: Component): boolean {
+  return canonicalComponent(a) === canonicalComponent(b)
+}
+
+/**
+ * The spelling-independent form of a Component: keys whose value says "no value" are dropped,
+ * so the two ways a document may say it compare equal.
+ *
+ * Both of ir-schema.md §1.1's classes land here. A Class A field (`description`) is `null`
+ * exactly when an older document omits the key, and a reader MUST NOT tell those apart. A Class
+ * B field on a Component (`publicApi`, `frameworks`) is omitted when empty, so `[]` is a
+ * non-conforming spelling of absence that a reader still meets — which is what the `?? []`
+ * normalizations the delta booleans above use have always assumed. Dropping both by shape
+ * rather than by field name keeps that assumption true for fields added to `v1` later.
+ */
+function canonicalComponent(component: Component): string {
+  const normalized: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(component)) {
+    if (value === null || value === undefined) continue
+    if (Array.isArray(value) && value.length === 0) continue
+    normalized[key] = value
+  }
+  return serializeCanonical(normalized, { format: "compact" })
 }
 
 function stringArraysEqual(a: readonly string[], b: readonly string[]): boolean {

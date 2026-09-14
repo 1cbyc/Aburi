@@ -1,6 +1,8 @@
+import { makeLanguageId } from "@aburi/core"
+import type { Component } from "@aburi/types"
 import { describe, expect, it } from "vitest"
 import { type DependencySideView, diffComponents, diffDependencies } from "../src"
-import { component, dependency } from "./fixtures"
+import { component, componentId, dependency } from "./fixtures"
 
 /**
  * Side views for two documents that skipped nothing. Every one of these tests is about
@@ -71,11 +73,114 @@ describe("diffComponents (I5)", () => {
     expect(result.changed[0]?.delta.frameworksChanged).toBe(true)
   })
 
-  it("does not emit changed[] entries when all three axes are stable", () => {
+  it("does not emit changed[] entries when the whole record is stable", () => {
     const before = component({ id: "billing", name: "billing", frameworks: [] })
     // Same id, same everything → not in changed[].
     const result = diffComponents([before], [before])
     expect(result.changed).toEqual([])
+  })
+
+  // #100 — change detection compares the whole Component; the three booleans summarise three
+  // axes and are not the definition of "changed" (diff-algorithm.md §6.1). A field outside
+  // them produced no entry at all, so the projection had no before/after pair to render.
+  it("reports a display-name change with all three delta booleans false", () => {
+    const before = component({ id: "billing", name: "Billing" })
+    const after = component({ id: "billing", name: "Billing & Invoicing" })
+    const result = diffComponents([before], [after])
+    expect(result.changed).toHaveLength(1)
+    expect(result.changed[0]?.before.name).toBe("Billing")
+    expect(result.changed[0]?.after.name).toBe("Billing & Invoicing")
+    expect(result.changed[0]?.delta).toEqual({
+      rootsChanged: false,
+      publicApiChanged: false,
+      frameworksChanged: false,
+    })
+  })
+
+  it("reports an added language", () => {
+    const before = component({ id: "billing", name: "billing", languages: [makeLanguageId("ts")] })
+    const after = component({
+      id: "billing",
+      name: "billing",
+      languages: [makeLanguageId("ts"), makeLanguageId("py")],
+    })
+    const result = diffComponents([before], [after])
+    expect(result.changed).toHaveLength(1)
+    expect(result.changed[0]?.after.languages).toEqual([makeLanguageId("ts"), makeLanguageId("py")])
+  })
+
+  it("reports a description added, edited and removed", () => {
+    const none = component({ id: "billing", name: "billing", description: null })
+    const written = component({ id: "billing", name: "billing", description: "Invoices" })
+    const edited = component({
+      id: "billing",
+      name: "billing",
+      description: "Invoices and dunning",
+    })
+    expect(diffComponents([none], [written]).changed).toHaveLength(1)
+    expect(diffComponents([written], [edited]).changed).toHaveLength(1)
+    expect(diffComponents([written], [none]).changed).toHaveLength(1)
+  })
+
+  it("still reports a changed component when name and roots move together", () => {
+    const before = component({ id: "billing", name: "Billing", roots: ["apps/billing"] })
+    const after = component({
+      id: "billing",
+      name: "Billing & Invoicing",
+      roots: ["apps/billing", "packages/billing-domain"],
+    })
+    const result = diffComponents([before], [after])
+    expect(result.changed).toHaveLength(1)
+    expect(result.changed[0]?.delta.rootsChanged).toBe(true)
+  })
+
+  // ir-schema.md §1.1: an absent Class A key reads as `null` and an empty Class B list reads as
+  // absent, so neither respelling is a change. A whole-record comparison has to be told this —
+  // it is the one thing a byte comparison would get wrong.
+  it("does not report a change when a document respells absence", () => {
+    const explicit = component({
+      id: "billing",
+      name: "billing",
+      publicApi: [],
+      frameworks: [],
+      description: null,
+    })
+    const omitted: Component = {
+      id: explicit.id,
+      name: explicit.name,
+      roots: explicit.roots,
+      languages: explicit.languages,
+    }
+    expect(diffComponents([explicit], [omitted]).changed).toEqual([])
+    expect(diffComponents([omitted], [explicit]).changed).toEqual([])
+  })
+
+  it("does not report a change when key insertion order differs", () => {
+    const a = component({
+      id: "billing",
+      name: "billing",
+      roots: ["apps/billing"],
+      description: "Invoices",
+    })
+    const b: Component = {
+      description: "Invoices",
+      languages: [makeLanguageId("ts")],
+      frameworks: [],
+      publicApi: [],
+      roots: ["apps/billing"],
+      name: "billing",
+      id: componentId("billing"),
+    }
+    expect(diffComponents([a], [b]).changed).toEqual([])
+  })
+
+  it("sorts changed[] by id", () => {
+    const rename = (id: string, name: string) => component({ id, name })
+    const result = diffComponents(
+      [rename("z", "Z"), rename("a", "A"), rename("m", "M")],
+      [rename("z", "Z2"), rename("a", "A2"), rename("m", "M2")],
+    )
+    expect(result.changed.map((c) => c.after.id)).toEqual(["a", "m", "z"])
   })
 })
 

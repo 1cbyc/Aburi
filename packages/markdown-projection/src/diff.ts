@@ -1,4 +1,5 @@
 import type {
+  Component,
   Dependency,
   DependencyUnknown,
   DiffResult,
@@ -884,15 +885,57 @@ function renderComponentChanges(diff: DiffResult): string[] {
   if (diff.components.changed.length > 0) {
     rows.push("### Changed")
     for (const ch of diff.components.changed) {
-      const flags: string[] = []
-      if (ch.delta.rootsChanged) flags.push("roots")
-      if (ch.delta.publicApiChanged) flags.push("publicApi")
-      if (ch.delta.frameworksChanged) flags.push("frameworks")
-      rows.push(`- \`${ch.after.id}\`: ${flags.join(", ")}`)
+      const fields = changedComponentFields(ch.before, ch.after)
+      // No field differs only for a diff this repository did not write: `diffComponents`
+      // emits an entry exactly when one does. Naming the component anyway beats a dangling
+      // colon — the artifact says it changed, and the projection is not the layer to argue.
+      rows.push(
+        fields.length === 0 ? `- \`${ch.after.id}\`` : `- \`${ch.after.id}\`: ${fields.join(", ")}`,
+      )
     }
     rows.push("")
   }
   return rows
+}
+
+/**
+ * The fields that actually differ between the two revisions of one Component, read from
+ * `before` / `after` rather than from `delta`.
+ *
+ * `delta` summarises three axes (roots, publicApi, frameworks); a Component also carries a
+ * display name, a language list and a description, and a change to those leaves all three
+ * booleans `false` (diff-algorithm.md §6.1). Rendering the booleans alone printed an empty
+ * flag list for exactly those changes — the reviewer-facing half of #100.
+ *
+ * Scalars carry their before → after inline, because that *is* the change; the list-valued
+ * fields name themselves and leave the values to the artifact, which is what the surrounding
+ * section has always done.
+ */
+function changedComponentFields(before: Component, after: Component): string[] {
+  const fields: string[] = []
+  if (before.name !== after.name) fields.push(`name (\`${before.name}\` → \`${after.name}\`)`)
+  if (!sameList(before.roots, after.roots)) fields.push("roots")
+  if (!sameList(before.publicApi ?? [], after.publicApi ?? [])) fields.push("publicApi")
+  if (!sameList(before.languages, after.languages)) fields.push("languages")
+  if (!sameList(before.frameworks ?? [], after.frameworks ?? [])) fields.push("frameworks")
+  // Class A (ir-schema.md §1.1): an absent key and `null` are the same answer, so the `??`
+  // is what keeps an older document that omits the key from reading as a description removal.
+  const beforeDescription = before.description ?? null
+  const afterDescription = after.description ?? null
+  if (beforeDescription !== afterDescription) {
+    fields.push(
+      `description (${renderDescription(beforeDescription)} → ${renderDescription(afterDescription)})`,
+    )
+  }
+  return fields
+}
+
+function renderDescription(description: string | null): string {
+  return description === null ? "none" : `\`${description}\``
+}
+
+function sameList(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((entry, i) => entry === b[i])
 }
 
 /**

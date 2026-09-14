@@ -695,6 +695,23 @@ componentDiff = {
 }
 ```
 
+Component identity is `id`. **Which fields make a Component `changed` and which fields the
+`delta` summarises are two different questions**, and answering them with one list is a bug this
+document once invited: a Component is `changed` when *any* field differs, while `delta` names
+only the three axes a reviewer scans for architectural movement.
+
+Reading the three booleans as the definition of change means a renamed component, an added
+language, or a new description produces `componentsChanged: 0` and an empty `changed[]` — and
+with no entry there is not even a before/after pair for the Markdown layer to render. The delta
+needs no fourth boolean to fix that: `changed[]` already carries `before` and `after`, so a
+consumer renders a name change by comparing them, and an entry whose three booleans are all
+`false` is well-formed and means "something outside those axes moved".
+
+Comparison is over the whole record, so a field added to `v1` later counts without this section
+being revisited, and it is spelling-independent in both directions ir-schema.md §1.1 allows: a
+Class A `description` compares `null` equal to an absent key, and a Class B `publicApi` /
+`frameworks` compares `[]` equal to an absent key.
+
 ### 6.2 Dependency diff
 
 ```

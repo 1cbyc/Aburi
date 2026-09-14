@@ -469,6 +469,14 @@ The section is omitted when the array is empty, and equally when the key is abse
 - roots: `apps/billing` → `apps/billing, packages/billing-domain`
 ```
 
+The fields listed for a changed Component are read from the entry's `before` / `after`, not from
+its `delta`. The delta summarises three axes (roots, publicApi, frameworks); a rename, a new
+language, or an edited description moves none of them (diff-algorithm.md §6.1), and rendering
+the booleans alone printed an empty list for exactly those changes. Scalar fields — `name`,
+`description` — carry their before → after inline, because for them that is the whole change;
+the list-valued fields name themselves. An absent `description` renders as `none`, which is the
+same answer as `null` (ir-schema.md §1.1).
+
 #### 🔗 Dependency changes
 
 ```md
