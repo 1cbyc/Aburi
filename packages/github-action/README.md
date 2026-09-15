@@ -23,17 +23,48 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      # Pin by branch (main) or by the per-package tag `changesets/action`
-      # creates on release (e.g. `@aburi/github-action@0.1.0`). An unscoped
-      # `vX.Y.Z` tag is intentionally not published because `changeset publish`
-      # names monorepo tags per package.
-      - uses: kage1020/Aburi/packages/github-action@main
+      # Moves with every 0.x release, breaking input changes included. Pin the full
+      # `v<x.y.z>` instead to hold one — see Pinning below.
+      - uses: kage1020/Aburi/packages/github-action@v0
         with:
           version: latest
           fail-on: "removed,dropped-toggled:to-dropped:>10"
 ```
 
 `fetch-depth: 0` is required so `aburi diff` can resolve the base ref locally.
+
+## Pinning
+
+`uses:` takes `{owner}/{repo}[/path]@{ref}`. The runner splits that value on `@` and
+rejects anything that is not exactly two segments, so the per-package tags `changeset
+publish` writes — `@aburi/github-action@<x.y.z>` — cannot be used as a ref: a workflow
+naming one fails to load with `Expected format {org}/{repo}[/path]@ref`, before any step
+runs. Release runs push two aliases that do parse, pointing at the same commit.
+
+| Ref | Moves? | Pick it when |
+|---|---|---|
+| `@v<x.y.z>` | Never | You want to keep running the bytes you reviewed. The release that creates the tag never re-points it. |
+| `@v<major>` | On every release of this action, prereleases excepted | You want fixes without a bump. Mutable, so what you run can change under you. |
+| `@main` | On every merge | You are tracking development, or you need something not released yet. |
+| `@<full 40-char SHA>` | Never | Same guarantee as `v<x.y.z>`, without trusting that the tag was never moved. |
+
+The `v*` tags begin at `v0.3.0`, the first release carrying this scheme. `v0.1.0` predates it
+and happens to name the same commit as `@aburi/github-action@0.1.0`, because the whole
+workspace released 0.1.0 at once; there is no `v0.2.0`. For anything older than `v0.3.0`,
+prefer a SHA.
+
+They are unprefixed because the path in front of them already says which action they belong
+to, and `changeset publish` only ever writes scoped `@aburi/<pkg>@<ver>` tags — so nothing
+else in this repository claims the `v*` namespace.
+
+While the major is `0`, `v0` crosses breaking input changes, because a `0.x` minor bump is
+where they land. Pin the full `v<x.y.z>` if that matters.
+
+The same tags work as an `actions/checkout` `ref:`, which is how the companion workflow under
+[Pull requests from a fork](#pull-requests-from-a-fork) pins the scripts it runs. A `ref:` is
+a plain git ref, so `@aburi/github-action@<x.y.z>` is legal *there* — it is only a `uses:`
+value that cannot hold it — but it names one release and nothing updates it, so the example
+uses the alias.
 
 ## Inputs
 
@@ -88,7 +119,7 @@ installed the workspace is the one that should run it.
     node-version: 24
     cache: pnpm
 - run: pnpm install --frozen-lockfile
-- uses: kage1020/Aburi/packages/github-action@main
+- uses: kage1020/Aburi/packages/github-action@v0
   with:
     cli: workspace
     fail-on: "removed"
@@ -144,7 +175,7 @@ jobs:
             && github.actor != 'dependabot[bot]' }}
     steps:
       # …checkout, install, build…
-      - uses: kage1020/Aburi/packages/github-action@main
+      - uses: kage1020/Aburi/packages/github-action@v0
         id: aburi
         with:
           cli: workspace
@@ -194,12 +225,14 @@ jobs:
     if: github.event.workflow_run.event == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      # Third-party code in the half that holds a writable token, so pin the ref: a tag or a
-      # commit SHA, never a moving branch.
+      # Third-party code in the half that holds a writable token, so pin the ref rather than
+      # tracking a branch. `v0` follows the newest `0.x` release of the action, which is
+      # what keeps this example from naming a version that goes stale; `v<x.y.z>` or a
+      # commit SHA holds exact bytes instead — see Pinning above, the same trade as `uses:`.
       - uses: actions/checkout@v4
         with:
           repository: kage1020/Aburi
-          ref: "@aburi/github-action@0.2.0"
+          ref: v0
           sparse-checkout: packages/github-action/scripts
           persist-credentials: false
       # …download the aburi-diff artifact from github.event.workflow_run.id, resolve the pull

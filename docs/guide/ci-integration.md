@@ -19,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
-      - uses: kage1020/Aburi/packages/github-action@main
+      - uses: kage1020/Aburi/packages/github-action@v0
         with:
           version: latest
           fail-on: "removed,dropped-toggled:to-dropped:>10"
@@ -40,6 +40,18 @@ Aburi checks out the base revision to analyse it, and a shallow clone cannot
 give it one. Without the full history the run stops early rather than handing
 you a wrong diff.
 :::
+
+### Pinning the action
+
+`@v0` above moves to the newest `0.x` release of the action, so a breaking input
+change arrives without you asking for it; `@main` changes on every merge. Pin the full
+`@v<x.y.z>` — created once by the release, never re-pointed — when you want to keep
+running the bytes you reviewed, or a full commit SHA when you would rather not trust that a
+tag was never moved.
+
+Which refs exist, what each one costs you, and why the `@aburi/github-action@<x.y.z>` tag in
+this repository is not one of them, are in
+[the action's Pinning section](https://github.com/kage1020/Aburi/blob/main/packages/github-action/README.md#pinning).
 
 ### Running the CLI your project installed
 
@@ -66,7 +78,7 @@ lockfile already pinned it.
     node-version: 24
     cache: pnpm
 - run: pnpm install --frozen-lockfile
-- uses: kage1020/Aburi/packages/github-action@main
+- uses: kage1020/Aburi/packages/github-action@v0
   with:
     cli: workspace
     fail-on: "removed"
@@ -101,7 +113,7 @@ jobs:
             && github.actor != 'dependabot[bot]' }}
     steps:
       # …checkout with fetch-depth: 0…
-      - uses: kage1020/Aburi/packages/github-action@main
+      - uses: kage1020/Aburi/packages/github-action@v0
         with:
           comment: ${{ env.CAN_COMMENT }}
           fail-on: "removed"
