@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { readFile } from "node:fs/promises"
 import { basename, join } from "node:path"
 import type { Component, ComponentId, LanguageId } from "@aburi/types"
@@ -362,11 +363,35 @@ function directoryLeaf(entry: Pick<MergedCandidate, "relativeRoot" | "absoluteRo
   return segments[segments.length - 1] ?? basename(entry.absoluteRoot)
 }
 
+/**
+ * The id a published npm name yields, with the scope folded in rather than discarded:
+ * `@alpha/utils` is `alpha-utils`, not `utils` (component-detect.md §4.1).
+ *
+ * Three answers, and the difference between the last two is what §4.1 means by a priority over
+ * *sources*:
+ *
+ * - `null` — this name says nothing §4.1 can use, so the next manifest is asked. `@scope/`
+ *   and a bare `@scope` are that: §4.2 has a name, §4.1 has none.
+ * - `""` — this name is the answer, and it cannot be an id. `componentIdOrThrow` says so and
+ *   names the package, rather than falling through to the directory.
+ * - anything else — the id.
+ *
+ * The bare part is kebab-cased on its own before the scope is prepended, so a name the
+ * grammar cannot express stays the second case. Folded in one pass it would not: `toKebabCase`
+ * drops the trailing hyphen, so `@acme/---` and a scope-plus-non-ASCII name would both come
+ * back as `acme` — the scope alone, silently, and identical for every unusable name in that
+ * scope.
+ */
 function toIdFromNpmName(npmName: string): string | null {
   if (npmName.length === 0) return null
-  const stripped = npmName.startsWith("@") ? (npmName.split("/")[1] ?? "") : npmName
-  if (stripped.length === 0) return null
-  return toKebabCase(stripped)
+  if (!npmName.startsWith("@")) return toKebabCase(npmName)
+  const slash = npmName.indexOf("/")
+  if (slash < 0) return null
+  const bare = npmName.slice(slash + 1)
+  if (bare.length === 0) return null
+  const kebabBare = toKebabCase(bare)
+  if (kebabBare.length === 0) return ""
+  return toKebabCase(`${npmName.slice(1, slash)}-${kebabBare}`)
 }
 
 function toKebabCase(input: string): string {
@@ -622,76 +647,176 @@ function normalizePackagePath(raw: string | undefined | null): string | null {
 }
 
 /**
- * Guarantee Component.id uniqueness in three passes:
+ * Guarantee Component.id uniqueness, order-independently (component-detect.md §4.1).
  *
- * 1. Try the parent-directory suffix (`shared` at `apps/shared` and `libs/shared` becomes
- *    `shared-apps` / `shared-libs`) — the human-readable case.
- * 2. If two collided components share the same parent segment (`team1/shared/pkg` and
- *    `team2/shared/pkg` both suffix to `pkg-shared`) or a suffix lands on another
- *    already-unique id, disambiguate with a stable `-2`, `-3`, … numeric tail.
- * 3. Validate that no id is duplicated on exit; anything left is a checker bug and must
- *    surface as an integrity failure downstream, not a silent duplicate here.
+ * 1. Walk up `roots[0]`, one ancestor directory at a time, suffixing every id that is still
+ *    shared, until each is unique or its root has no ancestors left.
+ * 2. Whatever the path could not separate takes a hash of `roots[0]` on top of the id it
+ *    reached.
+ * 3. Refuse to hand back a duplicate. Only a hash collision reaches this, and the caller it
+ *    protects is `aburi init`, which writes `components[]` without ever building an IR — so
+ *    the §14 #2 integrity check downstream never sees it.
+ *
+ * What the passes never read is a component's position in the list. `taken` does depend on
+ * the set of ids a component contends with — a package that arrives claiming an id in use
+ * moves someone — but that is a contended id rather than, as before, any package under the
+ * same parent renumbering its neighbours.
  */
 function resolveIdCollisions(components: Component[]): Component[] {
-  applyParentSuffixPass(components)
-  applyNumericSuffixPass(components)
+  applyAncestorSuffixPass(components)
+  applyRootHashPass(components)
+  assertIdsUnique(components)
   return components
 }
 
-function applyParentSuffixPass(components: Component[]): void {
-  const byId = new Map<ComponentId, Component[]>()
-  for (const c of components) {
-    const list = byId.get(c.id)
-    if (list === undefined) byId.set(c.id, [c])
-    else list.push(c)
-  }
-  for (const [id, group] of byId) {
-    if (group.length <= 1) continue
-    for (const c of group) {
-      const segments = c.roots[0]?.split("/").filter((s) => s.length > 0 && s !== ".") ?? []
-      const parent = segments.length > 1 ? segments[segments.length - 2] : null
-      // A parent that kebab-cases to nothing would produce a trailing-hyphen id. Leave the
-      // component unsuffixed instead and let the numeric pass separate it — the collision
-      // still gets resolved, and a component whose id was fine does not fail detection
-      // because of the segment above it.
-      const suffix = parent === undefined || parent === null ? "" : toKebabCase(parent)
-      c.id = suffix.length === 0 ? id : makeComponentId(`${id}-${suffix}`)
+/**
+ * How many hex characters of the root digest the last-resort suffix carries. Short enough to
+ * stay readable in an id, against a space that is the handful of components in one workspace
+ * whose whole path chain kebab-cases to the same thing. `assertIdsUnique` covers the rest.
+ */
+const ROOT_HASH_LENGTH = 8
+
+/** A component's id while the ancestor pass is deciding how much of its path it needs. */
+interface IdCandidate {
+  readonly component: Component
+  /** The id §4.1 derived, before any suffix. */
+  readonly base: ComponentId
+  /** Ancestor directory segments of `roots[0]`, nearest first. */
+  readonly ancestors: readonly string[]
+  /**
+   * How many of them this round has consumed — not how many the id carries. A segment that
+   * kebab-cases to nothing is consumed and contributes no suffix, which is exactly how a
+   * round can advance without changing an id.
+   */
+  taken: number
+}
+
+function applyAncestorSuffixPass(components: Component[]): void {
+  const candidates: IdCandidate[] = components.map((component) => ({
+    component,
+    base: component.id,
+    ancestors: ancestorSegments(component.roots[0] ?? ""),
+    taken: 0,
+  }))
+  for (;;) {
+    let extended = false
+    for (const group of groupBy(candidates, (candidate) => candidate.component.id).values()) {
+      if (group.length <= 1) continue
+      for (const candidate of group) {
+        // A candidate that has run out of path is left where it is rather than blocking the
+        // rest of its group: the ones that can still move may well separate from it, and the
+        // hash pass takes whatever is left.
+        if (candidate.taken >= candidate.ancestors.length) continue
+        candidate.taken++
+        extended = true
+      }
+    }
+    // Every round either lengthens at least one suffix — bounded by that root's depth — or
+    // ends the pass, so the loop terminates.
+    if (!extended) return
+    for (const candidate of candidates) {
+      candidate.component.id = suffixedId(candidate.base, candidate.ancestors, candidate.taken)
     }
   }
 }
 
-function applyNumericSuffixPass(components: Component[]): void {
-  // Keyed by `string` so the probe below can test a candidate suffix without minting an id
-  // for it. Appending `-2` to an id that is already valid cannot produce an invalid one, so
-  // the constructor runs once, on the value actually assigned.
-  const taken = new Set<string>()
-  // Two collided components can survive the parent-suffix pass either because their parent
-  // segments matched or because a rename collided with a third component. Walk in a stable
-  // order (roots[0]) so the tail assignment is deterministic; the first occurrence keeps
-  // its id and every subsequent duplicate takes -2, -3, …
-  const ordered = [...components].sort((a, b) =>
-    (a.roots[0] ?? "") < (b.roots[0] ?? "") ? -1 : (a.roots[0] ?? "") > (b.roots[0] ?? "") ? 1 : 0,
-  )
-  for (const c of ordered) {
-    if (!taken.has(c.id)) {
-      taken.add(c.id)
-      continue
+/**
+ * The last resort, for ids the path could not separate. Every member of a surviving group
+ * takes the hash — including the one that would have kept the bare id under a positional
+ * scheme, because "which one was first" is exactly the input this pass exists to avoid.
+ */
+function applyRootHashPass(components: Component[]): void {
+  for (const group of groupBy(components, (component) => component.id).values()) {
+    if (group.length <= 1) continue
+    for (const component of group) {
+      component.id = hashedId(component.id, component.roots[0] ?? "")
     }
-    let n = 2
-    while (taken.has(`${c.id}-${n}`)) n++
-    c.id = makeComponentId(`${c.id}-${n}`)
-    taken.add(c.id)
   }
+}
+
+/**
+ * The exit check the passes above cannot make for themselves.
+ *
+ * `applyRootHashPass` separates a group by digest rather than by construction, so uniqueness
+ * is overwhelmingly likely rather than certain. Where the result becomes an IR, invariant
+ * §14 #2 catches a duplicate; `aburi init` writes `components[]` straight to `aburi.json` and
+ * builds no IR, so without this it would persist the duplicate and report success.
+ */
+function assertIdsUnique(components: readonly Component[]): void {
+  for (const [id, group] of groupBy(components, (component) => component.id)) {
+    if (group.length <= 1) continue
+    const roots = group.map((component) => component.roots[0] ?? "?").join(", ")
+    throw new CoreError(
+      `Component id "${id}" is claimed by more than one component (${roots}) and collision ` +
+        `resolution could not separate them. Declare these components explicitly under ` +
+        `components[] in aburi.json.`,
+      { code: "component-id-collision-unresolved", value: id },
+    )
+  }
+}
+
+/** The directories above `root`, nearest first. `packages/a` has one; `.` has none. */
+function ancestorSegments(root: string): string[] {
+  const segments = root.split("/").filter((s) => s.length > 0 && s !== ".")
+  return segments.slice(0, -1).reverse()
+}
+
+/**
+ * `base` carrying its first `taken` ancestors as a suffix.
+ *
+ * A segment that kebab-cases to nothing contributes nothing rather than a doubled or trailing
+ * hyphen — the id stays valid, the collision stays unresolved, and the next round (or the
+ * hash pass) deals with it. A component whose own id was fine does not fail detection because
+ * of the segment above it.
+ */
+function suffixedId(base: ComponentId, ancestors: readonly string[], taken: number): ComponentId {
+  const suffix = ancestors
+    .slice(0, taken)
+    .map(toKebabCase)
+    .filter((segment) => segment.length > 0)
+  return suffix.length === 0 ? base : makeComponentId(`${base}-${suffix.join("-")}`)
+}
+
+/**
+ * `id` with a digest of `root` appended. Its own SHA-256 rather than `hashRawString`: that
+ * one is the fingerprint path, whose width is chosen for a different question, and an id
+ * respelled by a fingerprint constant moving would be a change nobody was making.
+ *
+ * `root` is already NFC — `toRelativePosix` normalizes it, which is what lets `withinRoot`
+ * compare roots against walk output raw — so the digest is of the same bytes on every machine.
+ */
+function hashedId(id: ComponentId, root: string): ComponentId {
+  const digest = createHash("sha256").update(root, "utf8").digest("hex")
+  return makeComponentId(`${id}-${digest.slice(0, ROOT_HASH_LENGTH)}`)
+}
+
+function groupBy<T>(items: readonly T[], key: (item: T) => string): Map<string, T[]> {
+  const groups = new Map<string, T[]>()
+  for (const item of items) {
+    const k = key(item)
+    const existing = groups.get(k)
+    if (existing === undefined) groups.set(k, [item])
+    else existing.push(item)
+  }
+  return groups
 }
 
 function compareString(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0
 }
 
-/** Internal: surfaced for tests that want to verify the kebab transformer. */
+/**
+ * Internal: surfaced for tests that want a derivation on its own.
+ *
+ * `resolveIdCollisions` is here because the alternative is reaching it through a tmpdir of
+ * seeded files: it is the one pass whose interesting cases are about *which* components exist
+ * together, and a table of them should cost a line each. It mutates the components handed to
+ * it and returns the same array.
+ */
 export const __testing = {
   toIdFromNpmName,
   toKebabCase,
   collectFrameworks,
   collectPublicApi,
+  resolveIdCollisions,
 }

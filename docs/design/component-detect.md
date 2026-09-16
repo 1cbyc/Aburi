@@ -135,7 +135,7 @@ Mapping from each workspace to a Component.
 ### 4.1 `id`
 
 Priority order:
-1. `package.json#name` (JS/TS): strip the scope and kebab-case it (`@scope/billing` → `billing`)
+1. `package.json#name` (JS/TS): fold the scope into the name and kebab-case the result (`@scope/billing` → `scope-billing`)
 2. `project.json#name` (nx): the project name, for a directory that has no `package.json`
 3. `package.name` in `Cargo.toml` (Rust)
 4. `project.name` in `pyproject.toml` (Python)
@@ -146,7 +146,18 @@ This is a priority over **sources**, not a single source: neither a manifest tha
 
 A directory that several detectors claim is described by all of their manifests at once (§7), and they are read in this order — by filename, so the order the detectors happened to run in cannot move an id. The `package.json` under a candidate's root is read whether or not a detector reported it: a directory holding one is an npm package however it was found, and nx reports only `project.json`.
 
-On collision (multiple workspaces yielding the same id) → append the parent directory name as a suffix (`billing` → `billing-apps` / `billing-packages`). When the parent segment kebab-cases to nothing, the id is left unsuffixed and the numeric-suffix pass (`billing-2`, `billing-3`) resolves the collision instead.
+The scope is folded in rather than discarded because it is the part of a published name that already tells two same-named packages apart, and the collision rule below cannot: in the usual layout every package sits directly under `packages/`, so `@alpha/utils` and `@beta/utils` collide on `utils` and suffix alike to `utils-packages`.
+
+The fold is over the *bare* name's id, not over the raw string: `@acme/---` yields the empty id and aborts as the rule below says, rather than kebab-casing to the scope alone and giving every unusable name in one scope the same silent id. It also erases the namespace boundary, so `@foo/bar-baz`, `@foo-bar/baz` and an unscoped `foo-bar-baz` are one id where the first two were distinct; that is a collision like any other and the rule below resolves it.
+
+On collision (multiple workspaces yielding the same id) → append the parent directory name as a suffix (`billing` → `billing-apps` / `billing-packages`). Where that is still not enough — `team1/shared/pkg` and `team2/shared/pkg` both suffix to `pkg-shared` — the suffix takes one more step up the path for every id still shared, until each is unique or its root has no more ancestors (`pkg-shared-team1` / `pkg-shared-team2`). A suffix that lands on another, already-unique id puts that id in the next round too, so it moves as well. What is left after the path runs out — two roots whose ancestor segments all kebab-case to nothing, or a group in which every member has consumed its whole path — takes a short hash of `roots[0]` **appended to the id it reached** (`utils-packages-b9b98f98`), every member of the group included. A root with no ancestors at all, `.`, is only in that position when the collision outlasts every other member's path too: `.` against `packages/foo` resolves to `app` / `app-packages` with no hash.
+
+Two things this does and does not promise, because the difference is the whole point of the rule:
+
+- **It never reads a component's position.** The suffix is built from that component's own base id and `roots[0]`, and how far up the path it goes is decided by the *set* of ids in contention — not by the order the components arrive in, and not by which of them sorted first. The positional `-2`, `-3`, … counter it replaces did exactly that: adding `@alpha/utils` ahead of `@beta/utils` and `@gamma/utils` demoted both of them by one, and since the id keys `Symbol.component`, both `Dependency` endpoints and cross-revision comparison, a single new package read downstream as every component having been replaced.
+- **It does not promise an id never moves.** A package that arrives claiming an id already in use moves whoever holds it: adding `packages/x` named `shared-libs` takes `team/libs/shared` from `shared-libs` to `shared-libs-team`. What has changed is the reach of that — before, *any* package under the same parent renumbered its neighbours; now only a package contending for the same id moves anything, and components elsewhere in the tree are untouched.
+
+Hash suffixes separate a group by digest rather than by construction, so uniqueness is checked once on exit. A duplicate that survives — no run has produced one — aborts with `component-id-collision-unresolved` rather than being handed back: `aburi init` writes `components[]` without building an IR, so the §14 #2 uniqueness invariant would not be the one to catch it.
 
 The result must satisfy `aburi.ir.v1.json#/$defs/ComponentId`. Names that kebab-case to the empty string — a directory whose name is entirely non-ASCII, say — cannot yield an id, and detection aborts with `invalid-component-id` naming the manifest or directory it came from. Declare the component explicitly in `aburi.json` `components[]` to override the derivation.
 
@@ -354,8 +365,8 @@ Implementation guidance:
 | CD4 | `Cargo.toml` `[workspace] members = ["crate-a"]` | 1 Component (crate-a) |
 | CD5 | `go.work` `use ./mod-a ./mod-b` | 2 Components |
 | CD6 | Single TS project with no markers | 1 Component (root, id = package.json name) |
-| CD7 | `package.json#name = "@scope/billing"` | Component.id = "billing", Component.name = "@scope/billing" |
-| CD8 | 2 workspaces generate the same id (both "shared") | Suffixes appended ("shared-apps" / "shared-packages") |
+| CD7 | `package.json#name = "@scope/billing"` | Component.id = "scope-billing", Component.name = "@scope/billing" |
+| CD8 | 2 workspaces generate the same id (both "shared") | Suffixes appended ("shared-apps" / "shared-packages"). Adding a third workspace elsewhere moves them only if it contends for one of those ids; where the path separates nothing, each id ends in a digest of its own `roots[0]` and adding a fourth leaves the first three byte-identical |
 | CD9 | `dependencies: {"@nestjs/core": "..."}` | frameworks = ["nestjs"] |
 | CD10 | `package.json#exports: {".": "./src/index.ts"}` | publicApi = ["src/index.ts"] |
 | CD11 | Autodetect finds nothing and there is no package.json | id = directory name (kebab-case), name = directory name |
@@ -364,7 +375,7 @@ Implementation guidance:
 | CD14 | `packages: [".", "packages/*"]` on a tree that also holds `src/` and `a/b/c/d/` | 2 Components: the workspace root (`roots: ["."]`) and the package |
 | CD15 | `packages: ["packages/*"]` where `packages/dist/` holds no manifest | `packages/dist` is not a Component |
 | CD16 | `packages: ["packages/*"]` where *no* matched directory holds a manifest | `managers[]` records pnpm with `roots: []`, §5's fallback makes the whole repository one Component, and both facts are named on stderr |
-| CD17 | pnpm and nx both claim `apps/billing`; `package.json#name = "@acme/billing-api"`, `project.json#name = "billing-e2e"` | 1 Component, id `billing-api`, name `@acme/billing-api`, with the `package.json`'s frameworks and publicApi |
+| CD17 | pnpm and nx both claim `apps/billing`; `package.json#name = "@acme/billing-api"`, `project.json#name = "billing-e2e"` | 1 Component, id `acme-billing-api`, name `@acme/billing-api`, with the `package.json`'s frameworks and publicApi |
 | CD18 | nx alone claims `apps/billing`, `project.json#name = "billing-web"` and a `dependencies` key in it | id and name `billing-web`, no frameworks, no publicApi |
 | CD19 | nx alone claims `apps/billing`, and a `package.json` sits beside the `project.json` | Identity, frameworks and publicApi come from the `package.json` |
 | CD20 | `apps/billing/package.json` is not valid JSON | Detection aborts with `workspace-manifest-malformed` naming the file |
