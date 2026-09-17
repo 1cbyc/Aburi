@@ -1,5 +1,5 @@
 import type { Dependency, IR } from "@aburi/types"
-import { compareStrings, isSymbolIdEndpoint } from "./format"
+import { compareStrings, inlineCode, isSymbolIdEndpoint, tableHeader, tableRow } from "./format"
 
 /** §4.2 — nodes above this render as text-only fallback so GitHub mermaid does not choke. */
 export const MERMAID_NODE_LIMIT = 100
@@ -111,7 +111,7 @@ function renderSkippedFiles(ir: IR): string[] {
   for (const reason of [...byReason.keys()].sort(compareStrings)) {
     const paths = byReason.get(reason) ?? []
     rows.push(`- **${reason}** (${paths.length}):`)
-    for (const path of paths) rows.push(`  - \`${path}\``)
+    for (const path of paths) rows.push(`  - ${inlineCode(path)}`)
   }
   return rows
 }
@@ -121,7 +121,7 @@ function renderManagers(ir: IR): string {
   return ir.workspace.managers
     .slice()
     .sort((a, b) => compareStrings(a.tool, b.tool))
-    .map((m) => `${m.tool} (${m.roots.map((r) => `\`${r}\``).join(", ")})`)
+    .map((m) => `${m.tool} (${m.roots.map((r) => inlineCode(r)).join(", ")})`)
     .join(", ")
 }
 
@@ -129,16 +129,14 @@ function renderComponentsTable(ir: IR): string[] {
   if (ir.components.length === 0) {
     return ["_No components defined._"]
   }
-  const rows: string[] = []
-  rows.push("| id | roots | languages | frameworks | symbols |")
-  rows.push("|---|---|---|---|---|")
+  const rows: string[] = [...tableHeader(["id", "roots", "languages", "frameworks", "symbols"])]
   const symbolCountsByComponent = countSymbolsPerComponent(ir)
   for (const c of [...ir.components].sort((a, b) => compareStrings(a.id, b.id))) {
-    const roots = c.roots.map((r) => `\`${r}\``).join(", ")
+    const roots = c.roots.map((r) => inlineCode(r)).join(", ")
     const languages = c.languages.join(", ")
     const frameworks = (c.frameworks ?? []).length > 0 ? (c.frameworks ?? []).join(", ") : "—"
     const symbolCount = symbolCountsByComponent.get(c.id) ?? 0
-    rows.push(`| ${c.id} | ${roots} | ${languages} | ${frameworks} | ${symbolCount} |`)
+    rows.push(tableRow([c.id, roots, languages, frameworks, String(symbolCount)]))
   }
   return rows
 }
@@ -217,7 +215,7 @@ function renderDependencies(ir: IR): string[] {
     rows.push("Fallback list:")
     rows.push("")
     for (const d of sortedDeps(componentDeps)) {
-      rows.push(`- ${d.from} → ${d.to} (via \`${d.via}\`)`)
+      rows.push(`- ${d.from} → ${d.to} (via ${inlineCode(d.via)})`)
     }
   }
   return rows
@@ -292,10 +290,10 @@ function renderEffectSurface(ir: IR): string[] {
     return compareStrings(a.effect, b.effect)
   })
   const top = sorted.slice(0, EFFECT_SURFACE_TOP_N)
-  const out: string[] = ["| effect | count | components |", "|---|---|---|"]
+  const out: string[] = [...tableHeader(["effect", "count", "components"])]
   for (const r of top) {
     const comps = r.components.size === 0 ? "—" : [...r.components].sort().join(", ")
-    out.push(`| ${r.effect} | ${r.count} | ${comps} |`)
+    out.push(tableRow([r.effect, String(r.count), comps]))
   }
   return out
 }

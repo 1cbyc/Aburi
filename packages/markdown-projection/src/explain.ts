@@ -3,10 +3,13 @@ import {
   callRow,
   compareStrings,
   effectRow,
+  inlineCode,
   requireDropReason,
   ruleRow,
   signatureLine,
   splitDecorators,
+  tableHeader,
+  tableRow,
 } from "./format"
 
 export interface ProjectSymbolExplainContext {
@@ -51,13 +54,13 @@ export function projectSymbolExplain(
 
 function renderKeptExplain(symbol: IRSymbol, context: ProjectSymbolExplainContext): string {
   const lines: string[] = []
-  lines.push(`# \`${symbol.name}\` *(${symbol.kind})*`)
+  lines.push(`# ${inlineCode(symbol.name)} *(${symbol.kind})*`)
   lines.push("")
   if (symbol.component !== null && symbol.component !== undefined) {
     lines.push(`**Component**: ${symbol.component}`)
   }
   lines.push(
-    `**File**: \`${symbol.source.file}:${symbol.source.startLine}-${symbol.source.endLine}\``,
+    `**File**: ${inlineCode(`${symbol.source.file}:${symbol.source.startLine}-${symbol.source.endLine}`)}`,
   )
   lines.push(`**Visibility**: ${symbol.visibility}`)
   lines.push(`**Language**: ${symbol.language}`)
@@ -88,7 +91,7 @@ function renderKeptExplain(symbol: IRSymbol, context: ProjectSymbolExplainContex
   if (symbol.rules.length > 0) {
     lines.push("## Rules")
     lines.push("")
-    for (const r of [...symbol.rules].sort((a, b) => a.line - b.line)) lines.push(ruleRow(r))
+    for (const r of [...symbol.rules].sort((a, b) => a.line - b.line)) lines.push(...ruleRow(r))
     lines.push("")
   }
 
@@ -125,22 +128,22 @@ function renderKeptExplain(symbol: IRSymbol, context: ProjectSymbolExplainContex
   if (callers.length > 0) {
     lines.push("## Called by")
     lines.push("")
-    for (const from of callers) lines.push(`- \`${from}\``)
+    for (const from of callers) lines.push(`- ${inlineCode(from)}`)
     lines.push("")
   }
 
   if (symbol.derivedBy.length > 0) {
     lines.push("## Derived by")
     lines.push("")
-    for (const d of [...symbol.derivedBy].sort()) lines.push(`- \`${d}\``)
+    for (const d of [...symbol.derivedBy].sort()) lines.push(`- ${inlineCode(d)}`)
     lines.push("")
   }
 
   lines.push("## Fingerprint")
   lines.push("")
-  lines.push(`- api: \`${symbol.fingerprint.api}\``)
-  lines.push(`- logic: \`${symbol.fingerprint.logic}\``)
-  lines.push(`- syntax: \`${symbol.fingerprint.syntax}\``)
+  lines.push(`- api: ${inlineCode(symbol.fingerprint.api)}`)
+  lines.push(`- logic: ${inlineCode(symbol.fingerprint.logic)}`)
+  lines.push(`- syntax: ${inlineCode(symbol.fingerprint.syntax)}`)
   lines.push("")
 
   return `${lines
@@ -177,17 +180,16 @@ function renderCallResolution(
   const bucketByKey = new Map<string, UnresolvedCallDiagnostic>()
   for (const d of mine) bucketByKey.set(`${d.line}\t${d.target}`, d)
 
-  lines.push("| line | target | resolved | bucket | candidates |")
-  lines.push("|---|---|---|---|---|")
+  lines.push(...tableHeader(["line", "target", "resolved", "bucket", "candidates"]))
   for (const call of [...symbol.calls].sort((a, b) => a.line - b.line)) {
     const diagnostic = bucketByKey.get(`${call.line}\t${call.target}`)
-    const resolved = call.resolved === null ? "—" : `\`${call.resolved}\``
-    const bucket = diagnostic === undefined ? "—" : `\`${diagnostic.bucket}\``
+    const resolved = call.resolved === null ? "—" : inlineCode(call.resolved)
+    const bucket = diagnostic === undefined ? "—" : inlineCode(diagnostic.bucket)
     const candidates =
       diagnostic === undefined || diagnostic.candidates.length === 0
         ? "—"
-        : diagnostic.candidates.map((c) => `\`${c}\``).join("<br>")
-    lines.push(`| ${call.line} | \`${call.target}\` | ${resolved} | ${bucket} | ${candidates} |`)
+        : diagnostic.candidates.map((c) => inlineCode(c)).join("<br>")
+    lines.push(tableRow([String(call.line), inlineCode(call.target), resolved, bucket, candidates]))
   }
   lines.push("")
   return lines
@@ -211,13 +213,13 @@ function collectCallers(symbol: IRSymbol, dependencies: readonly Dependency[]): 
 
 function renderDroppedExplain(symbol: IRSymbol): string {
   const lines: string[] = []
-  lines.push(`# \`${symbol.name}\` *(${symbol.kind})* — dropped`)
+  lines.push(`# ${inlineCode(symbol.name)} *(${symbol.kind})* — dropped`)
   lines.push("")
   if (symbol.component !== null && symbol.component !== undefined) {
     lines.push(`**Component**: ${symbol.component}`)
   }
   lines.push(
-    `**File**: \`${symbol.source.file}:${symbol.source.startLine}-${symbol.source.endLine}\``,
+    `**File**: ${inlineCode(`${symbol.source.file}:${symbol.source.startLine}-${symbol.source.endLine}`)}`,
   )
   lines.push(`**Drop reason**: ${requireDropReason(symbol)}`)
   lines.push("")
