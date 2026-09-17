@@ -10,6 +10,36 @@
  */
 export const ABURI_COMMENT_MARKER = "<!-- aburi:diff-comment -->"
 
+/**
+ * What {@link ensureMarker} puts between the marker and the body. Shared with the budget below
+ * rather than spelled in both: the two are the same bytes, and a change to one that missed the
+ * other would move the budget silently, in the direction of a body 65538 bytes long.
+ */
+const MARKER_SEPARATOR = "\n\n"
+
+/**
+ * GitHub's ceiling on an issue-comment body. A create or update carrying more is rejected with
+ * a 422 and nothing is posted — there is no partial write to fall back on.
+ */
+export const GITHUB_COMMENT_MAX_BYTES = 65536
+
+/**
+ * What a report rendered for the default marker may weigh: the ceiling less that marker and its
+ * separator. This is the number to render with — `aburi diff --max-bytes <n>`
+ * (`markdown-projection.md` §6.4) drops whole sections to meet it — and the default
+ * `scripts/resolve-max-bytes.mjs` holds.
+ *
+ * The action passes it on every run that writes Markdown, `comment: false` included, because
+ * that is the mode a fork's pull request uses and its artefact is posted by another workflow
+ * (`docs/design/github-action.md` §5.2). A caller naming its own `max-bytes` gets that instead,
+ * and `max-bytes: 0` gets no cap at all.
+ *
+ * A caller passing its own {@link UpsertOptions.marker} should derive its own budget: a longer
+ * marker leaves the report less room than this.
+ */
+export const ABURI_COMMENT_BODY_MAX_BYTES =
+  GITHUB_COMMENT_MAX_BYTES - Buffer.byteLength(`${ABURI_COMMENT_MARKER}${MARKER_SEPARATOR}`, "utf8")
+
 export interface PullRequestRef {
   readonly owner: string
   readonly repo: string
@@ -48,6 +78,22 @@ export type UpsertOutcome =
 export async function upsertPullRequestComment(options: UpsertOptions): Promise<UpsertOutcome> {
   const marker = options.marker ?? ABURI_COMMENT_MARKER
   const bodyWithMarker = ensureMarker(options.body, marker)
+  // Measured before the round trip rather than left to the API. GitHub answers an oversized body
+  // with a bare 422 whose message says nothing about size, after the list call has already paged
+  // through every comment on the pull request; this says what is wrong and what renders smaller.
+  const size = Buffer.byteLength(bodyWithMarker, "utf8")
+  if (size > GITHUB_COMMENT_MAX_BYTES) {
+    // The budget in the message is derived from the marker actually in use, not from the default
+    // one: a caller with a longer marker that re-rendered at 65507 would overflow again, on the
+    // advice of this very line.
+    const budget =
+      GITHUB_COMMENT_MAX_BYTES - Buffer.byteLength(`${marker}${MARKER_SEPARATOR}`, "utf8")
+    throw new Error(
+      `Comment body is ${size} bytes, over GitHub's ${GITHUB_COMMENT_MAX_BYTES}-byte limit; ` +
+        `GitHub would reject it with a 422. Render the report with a size cap — ` +
+        `aburi diff --max-bytes ${budget} — and post that.`,
+    )
+  }
   const apiBase = options.apiBase ?? "https://api.github.com"
   const fetchImpl = options.fetch ?? globalThis.fetch
 
@@ -228,5 +274,5 @@ function parseComment(row: unknown): StoredComment | null {
  */
 export function ensureMarker(body: string, marker: string): string {
   if (body.includes(marker)) return body
-  return `${marker}\n\n${body}`
+  return `${marker}${MARKER_SEPARATOR}${body}`
 }

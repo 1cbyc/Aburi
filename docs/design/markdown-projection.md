@@ -419,6 +419,7 @@ The output of `aburi diff`. Its primary use case is pasting into PR comments.
 
 ## ⚠ API changes
 ## 🔧 Logic changes
+## 🧵 Slice View
 ## ➕ Added
 ## ➖ Removed
 ## ❔ Unknown
@@ -431,7 +432,14 @@ The output of `aburi diff`. Its primary use case is pasting into PR comments.
 ## 🎨 Syntax-only changes
 ```
 
-The section order is fixed, **highest importance → lowest**. The bottom 3 sections (**Moved / Dropped / Syntax-only**) are folded in `<details>`. Moved+Changed is not folded because it contains semantic changes.
+The section order is fixed, **highest importance → lowest**, and this list is the order: §6.4 drops
+sections from the bottom of it, and MP13 is stated against it, so a list that has drifted from the
+projection is a size cap that drops the wrong thing.
+
+Three sections — **Moved**, **Dropped changes** and **Syntax-only changes** — are folded in
+`<details>`. They are not contiguous: Component changes and Dependency changes sit between Moved
+and Dropped changes, unfolded. Moved + Changed is not folded either, because it carries semantic
+change worth reading.
 
 The `· ?N unknown` suffix on the Summary line appears only when `summary.unknown` is non-zero, so the line a reviewer skims on every PR does not carry a permanent `?0`. It qualifies the counts beside it: added and removed are both smaller than the truth by that much.
 
@@ -616,6 +624,59 @@ When `aburi diff` runs, a one-line summary is printed to stdout:
 
 It points to `out/diff.md` for the details.
 
+### 6.4 Size cap (`maxBytes`)
+
+The document's primary destination has a hard ceiling: GitHub rejects an issue-comment body over
+**65536 bytes** with a 422, and posts nothing. A minimal symbol renders at roughly 210 bytes, so a
+pull request adding about 310 symbols is already past it — a large refactor is exactly the review
+that loses its report.
+
+`projectDiff(diff, { maxBytes })` caps the result. Absent, there is no cap: a file on disk should
+hold everything, and `diff.json` always does.
+
+The cap is honoured by **dropping whole sections**, never by cutting the string. A cut at 65536
+bytes lands inside a `<details>` block or a code fence as often as not, and what GitHub then
+renders is an open fence swallowing the rest of the report. Sections go in ascending order of
+importance, which is the §6.1 order read from the bottom: Syntax-only first, API changes last.
+
+What survives is therefore always a prefix of the §6.1 order — a reviewer never loses an API
+change while an implementation refactor stays. The title and the Summary line are never dropped,
+so a budget smaller than those is not achievable and the document comes back over it.
+
+A section is the smallest unit: one section larger than the whole budget is dropped entirely, even
+when it was the only one. A branch that adds two thousand symbols therefore gets a Summary line and
+the note, and reads the rest from `diff.json` or the uncapped artefact. Trimming entries inside a
+section, so such a report keeps its first few hundred, is a future refinement — worth having, and
+not at the price of a comment that never posts.
+
+A capped document says so, directly under the Summary:
+
+```md
+> ⚠ **3 sections were omitted** to keep this report within 65507 bytes: 🔗 Dependency changes, 💧 Dropped changes, 🎨 Syntax-only changes. The full report is the same diff rendered without a size cap.
+```
+
+On the one path that comes back over budget — every section dropped and the remainder still too
+large — the note says that instead, because a line promising a budget the bytes below it miss is
+worst exactly where it matters most:
+
+```md
+> ⚠ **4 sections were omitted** and this report still could not be brought within 300 bytes: …
+```
+
+`aburi diff` also warns on stderr when it writes such a file, so a caller who asked for a number
+and got a bigger one hears it from the tool as well as from the document.
+
+Sections are named in document order rather than in the order they were dropped: the reader is
+looking for a heading that is not there, and that is the order they looked in.
+
+The budget is measured on the whole document in UTF-8 bytes, note included — naming one more
+section makes the note longer, so a budget checked against a note that does not yet say what it
+will say is missed by exactly the length of the last name.
+
+`aburi diff --max-bytes <n>` is the CLI spelling ([`cli-spec.md`](./cli-spec.md) §6.2). The GitHub
+Action passes 65507 by default: the 65536-byte limit less the 29-byte marker line the upsert
+prepends ([`github-action.md`](./github-action.md) §5.2).
+
 ## 7. `aburi explain <id>` — single Symbol
 
 Renders L2 standalone. Written to `out/symbols/<sanitized-id>.md` or to `stdout`.
@@ -730,6 +791,7 @@ All Markdown projection output is **English, with fixed wording**.
 | MP10 | diff where only `delta.syntaxChanged` is true | Classified into the Syntax-only section (folded) |
 | MP11 | diff containing a moved+changed symbol | Moved + Changed section (not folded) |
 | MP12 | 0 components (empty IR) | workspace.md is emitted, but the Components table is empty |
+| MP13 | diff projected with `maxBytes` | Result is at most that many UTF-8 bytes, except where the title, the Summary line and the note alone exceed the budget — which is not achievable, and says so in the note instead. The sections kept are a prefix of the §6.1 order, and a note names the ones that went |
 
 ## 12. Design decisions
 
@@ -764,3 +826,14 @@ Unnecessary during review, but valuable for debugging and for explaining "why di
 ### 12.8 Whether to use emoji
 
 Emoji in section headings (⚠ / 🔧 / ➕ etc.) serve visibility. Only emoji that are CommonMark-compatible and render stably on GitHub are used. A config to disable them by preference (`output.emoji: false`) will be considered for a future release (see the [roadmap](../roadmap.md)).
+
+### 12.9 Dropping sections rather than truncating the string
+
+A byte budget can be met by cutting at the last code point that fits, and for most documents that
+would be the smaller change. Not for this one: its sections are `<details>` blocks and fenced code,
+and a cut inside either produces Markdown that renders as one unclosed element eating everything
+after it — a report that looks broken rather than shortened, and says nothing about what is
+missing. Dropping whole sections costs the least important content, keeps every remaining block
+well-formed, and leaves a note that names what went and how to get it back. §12.4's importance
+order is what makes the choice of victim obvious: it already ranks the sections, so the cap reads
+it from the bottom.

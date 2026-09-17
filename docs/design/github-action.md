@@ -31,6 +31,7 @@ prefixing a marker, and never decides what is worth failing on — `--fail-on` i
 | `working-directory` | `.` | Where the CLI runs, and — under `cli: workspace` — where it is resolved from. |
 | `cli` | `dlx` | Resolution mode. §3. |
 | `comment` | `true` | Whether to upsert the report as a comment. |
+| `max-bytes` | *(empty)* | Forwarded to `--max-bytes`. Empty means 65507; `0` means no cap. §5.2. |
 | `token` | `github.token` | Token for the comment API. |
 | `node-version` / `pnpm-version` | `24` / `10` | Toolchain for `cli: dlx` only. |
 
@@ -226,3 +227,56 @@ above, since it runs third-party code in the privileged half — and
 carries that recipe. A consumer who does not want the second workflow at all can keep
 `comment: false` on fork pull requests and read the report from the artifact; the diff and the gate
 run either way.
+
+### 5.2 The size the comment has to fit
+
+GitHub rejects a comment body over **65536 bytes** with a 422 and posts nothing at all. The report
+is roughly 210 bytes per symbol, so a pull request adding about 310 symbols reaches it — and the
+run that loses its comment is the large refactor, the one most worth reading.
+
+So the action renders the report to fit rather than discovering the ceiling at the API: it passes
+`--max-bytes 65507`, which is the 65536-byte limit less the 29-byte marker line the upsert
+prepends. The projection meets that by dropping whole sections, least important first, and says at
+the top of the report which ones it dropped ([`markdown-projection.md`](./markdown-projection.md)
+§6.4). `diff.json` is not capped: the artefact keeps everything the comment could not.
+
+The budget is `ABURI_COMMENT_BODY_MAX_BYTES` in `src/comment.ts`, and `test/action-yml.test.ts`
+holds the manifest's copy of the number to it — a marker of a different length moves the budget,
+and a manifest still passing the old one is either 29 bytes short or 29 bytes over.
+
+The decision lives in [`scripts/resolve-max-bytes.mjs`](https://github.com/kage1020/Aburi/blob/main/packages/github-action/scripts/resolve-max-bytes.mjs)
+rather than in a branch inside the step, for the reason the CLI resolver does (§3.2): a `run:`
+block is never executed by a test, so everything a test can say about one is spelling. Dropping a
+guard from it would leave CI green and break every run — and the failure here is the quiet kind,
+an oversized report and a comment that never posts. `test/resolve-max-bytes.test.ts` runs the
+script as a process, against CLIs that do and do not carry the flag and one that cannot start.
+
+Four details are deliberate:
+
+- **The cap applies under `comment: false` too.** That is the mode a fork's pull request runs in
+  (§5.1), where the Markdown travels as an artefact for the companion workflow to post. A cap that
+  keyed on `comment` would leave that file oversized and move the 422 onto the one pull request
+  whose author cannot see the companion's log.
+- **The flag is probed for, not assumed.** `version` pins the CLI while this action is referenced
+  by ref, so an older CLI under a newer action is the documented arrangement, and an option that
+  CLI has never heard of would fail every such run at argv parsing. The script asks
+  `aburi diff --help` first and, finding nothing, warns and renders uncapped — which is what that
+  CLI did anyway. The warning names both upgrade routes, because `version` means nothing under
+  `cli: workspace`.
+- **A probe that could not run is not a missing flag.** A registry outage, a typo in `version`, an
+  EACCES on the store and a CLI that crashes at startup all exit non-zero, and reporting them as
+  "this CLI has no `--max-bytes`" would name a cause nothing established. They get their own
+  warning, carrying the first line the probe wrote. The output is captured rather than piped into
+  `grep`: `grep -q` closes the pipe at its first match, and a writer still going takes SIGPIPE,
+  which under `pipefail` turns a successful match into a failed pipeline once the help text
+  outgrows the pipe buffer.
+- **`format: json` caps nothing.** That run writes no `diff.md`, so there is no document to fit
+  and no reason to spend a probe. The CLI says the same thing from its end, with a warning rather
+  than an error: the action passes the flag without consulting `format`, and an input error there
+  would fail every `format: json` user.
+
+Both ends of the upsert still measure before they write — `scripts/upsert-comment.mjs` with exit 2
+and a one-line annotation, `upsertPullRequestComment` by throwing. Neither can re-render a finished
+document, and cutting the string would post half a `<details>` block; what they can do is say which
+file is how large, and which flag makes a smaller one, instead of relaying a 422 that never
+mentions size.

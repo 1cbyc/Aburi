@@ -162,6 +162,7 @@ scanning.
 | `--output-dir <dir>` | Where to write. Falls back to `output.dir`, then `out`. |
 | `--format <fmt>` | `json`, `md`, or `both`. |
 | `--compact` | JSON without indentation. |
+| `--max-bytes <n>` | Cap `diff.md` at n bytes. See below. |
 | `--config <path>` | Use a different config file. |
 
 In ref mode, a scan that did not finish cleanly exits `3` even with no
@@ -172,6 +173,35 @@ here instead.
 aburi diff main..HEAD
 aburi diff main..HEAD --fail-on 'removed,dropped-toggled:to-dropped:>10'
 aburi diff --base ir-main.json --head ir-branch.json --format md
+```
+
+### `--max-bytes`
+
+A GitHub comment body cannot exceed 65536 bytes, and the report is written to be pasted into
+one. A minimal symbol takes about 210 bytes of it, so a branch adding a few hundred symbols
+produces a report GitHub refuses outright — the review that needed it most gets nothing.
+
+`--max-bytes` caps `diff.md`. It is met by dropping whole sections, least important first, not by
+cutting the text mid-fence, and the report says at the top which sections went:
+
+```
+> ⚠ **2 sections were omitted** to keep this report within 65507 bytes: 💧 Dropped changes, 🎨 Syntax-only changes. The full report is the same diff rendered without a size cap.
+```
+
+The sections that survive are always the important ones: API changes go last, Syntax-only first.
+`diff.json` is never capped, so nothing is lost from the artefact you can query.
+
+The CLI has no cap unless you pass one: omitting `--max-bytes` writes the whole document.
+`--max-bytes 0` is not the way to say that — it exits `2`, along with every other value that is
+not a positive integer.
+
+The [GitHub Action](https://aburi.kage1020.com/guide/ci-integration) passes `65507` for you —
+65536 less the hidden marker it prepends — so you only reach for this flag to choose a smaller
+comment. There, `max-bytes: 0` *is* the spelling for no cap: the action input takes it and passes
+no flag at all.
+
+```bash
+aburi diff main..HEAD --max-bytes 65507
 ```
 
 ### `--fail-on` grammar

@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url"
 import { DEFAULT_OUTPUT_DIRNAME, DIFF_JSON_FILENAME, DIFF_MD_FILENAME } from "@aburi/cli"
 import { describe, expect, it } from "vitest"
 import { parse } from "yaml"
-import { ABURI_COMMENT_MARKER } from "../src/comment"
+import { ABURI_COMMENT_BODY_MAX_BYTES, ABURI_COMMENT_MARKER } from "../src/comment"
 
 const ACTION_PATH = resolve(dirname(fileURLToPath(import.meta.url)), "..", "action.yml")
 /** The opening of a GitHub expression, escaped so this file does not hold one it forbids. */
@@ -15,6 +15,13 @@ const RESOLVER_PATH = resolve(
   "..",
   "scripts",
   "resolve-cli-bin.mjs",
+)
+
+const MAX_BYTES_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "scripts",
+  "resolve-max-bytes.mjs",
 )
 
 const UPSERT_PATH = resolve(
@@ -68,6 +75,7 @@ describe("action.yml", () => {
       "working-directory",
       "cli",
       "comment",
+      "max-bytes",
       "token",
       "node-version",
       "pnpm-version",
@@ -181,6 +189,75 @@ describe("action.yml", () => {
     )
     expect(validateStep?.run).toMatch(/case "\$COMMENT" in\s+true\|false\) : ;;/)
     expect(validateStep?.run).toContain("comment must be true or false")
+  })
+
+  it("decides the size cap through the committed script, which is where it is tested", async () => {
+    // A `run:` block is never executed by a test, so everything asserted about one here is
+    // spelling. The four outcomes of this decision — default, caller's value, no cap, unsupported
+    // flag — live in a script that `test/resolve-max-bytes.test.ts` runs for real.
+    const action = await loadAction()
+    const run = action.runs.steps.find((s) => s.id === "diff")?.run ?? ""
+    expect(run).toContain('node "$GITHUB_ACTION_PATH/scripts/resolve-max-bytes.mjs"')
+    expect(run).toContain('if [ -n "$budget" ]; then args+=(--max-bytes "$budget"); fi')
+    expect(action.inputs["max-bytes"]?.default).toBe("")
+    await expect(stat(MAX_BYTES_PATH)).resolves.toBeDefined()
+  })
+
+  it("holds the default budget to the marker the upsert prepends", async () => {
+    // GitHub's 65536-byte comment limit less that marker line. Asserted against `src/comment.ts`
+    // rather than spelled twice: a change to the marker moves the budget, and a script still
+    // holding the old number renders a report that fits by 29 bytes too few — or, the other way,
+    // one the API rejects with a 422.
+    const source = await readFile(MAX_BYTES_PATH, "utf8")
+    expect(source).toContain(`const DEFAULT_BUDGET = ${ABURI_COMMENT_BODY_MAX_BYTES}`)
+  })
+
+  it("caps under `comment: false` too, because that is the mode a fork's pull request runs in", async () => {
+    // There, the Markdown goes up as an artefact and `aburi-comment.yml` posts it with the
+    // repository's own token. A cap that keyed on `comment` would leave that file oversized and
+    // move the 422 to the one pull request whose author cannot see the companion's log.
+    const action = await loadAction()
+    const diffStep = action.runs.steps.find((s) => s.id === "diff")
+    expect(diffStep?.env?.COMMENT).toBeUndefined()
+    expect(diffStep?.run).not.toContain('"$COMMENT"')
+  })
+
+  it("resolves the budget after the runner, and passes it to the CLI", async () => {
+    // The probe inside the script runs the CLI, so it cannot be decided before the CLI is
+    // resolved. Compared by line rather than by `indexOf` over the whole block: the first
+    // `--max-bytes` in this step's text is inside the comment above the code, so a reworded
+    // sentence could move or satisfy that assertion without any behaviour changing.
+    const action = await loadAction()
+    const lines = (action.runs.steps.find((s) => s.id === "diff")?.run ?? "").split("\n")
+    const runnerLine = lines.findIndex((line) => line.includes("runner=(pnpm dlx"))
+    const budgetLine = lines.findIndex((line) => line.includes("resolve-max-bytes.mjs"))
+    const passLine = lines.findIndex((line) => line.includes('args+=(--max-bytes "$budget")'))
+    expect(runnerLine).toBeGreaterThanOrEqual(0)
+    expect(budgetLine).toBeGreaterThan(runnerLine)
+    expect(passLine).toBeGreaterThan(budgetLine)
+  })
+
+  it("reports a rejected `max-bytes` as exit 2, with `cli-exit-code` set", async () => {
+    // Same shape as the CLI resolver's own failure: an early exit that skipped the step outputs
+    // would leave a caller testing `cli-exit-code != '0'` reading a misconfiguration as success.
+    const action = await loadAction()
+    const run = action.runs.steps.find((s) => s.id === "diff")?.run ?? ""
+    const guard = run.slice(run.indexOf('if [ "$budget_status" != "0" ]'))
+    expect(guard).toContain('echo "cli-exit-code=2" >> "$GITHUB_OUTPUT"')
+    expect(guard.slice(0, guard.indexOf("exit 2"))).toContain("cli-exit-code=2")
+  })
+
+  it("rejects a `max-bytes` that is not a number before installing a toolchain", async () => {
+    // The script rejects it too, and is where the rule is tested. This copy earns its place by
+    // running first: under `cli: dlx` the later one costs a package fetch to say the same thing.
+    const action = await loadAction()
+    const validateStep = action.runs.steps.find(
+      (s) => typeof s.run === "string" && s.run.includes("max-bytes must be"),
+    )
+    expect(validateStep?.run).toContain("max-bytes must be a non-negative integer")
+    expect(validateStep?.env?.MAX_BYTES).toContain("inputs.max-bytes")
+    // Named for what it is: a fail-fast duplicate, not the only guard.
+    expect(validateStep?.run).toContain("resolve-max-bytes.mjs")
   })
 
   it("installs Node and pnpm only for the dlx path", async () => {

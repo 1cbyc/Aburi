@@ -85,6 +85,12 @@ export interface DiffOptions {
   failOn?: string
   configPath?: string
   compact?: boolean
+  /**
+   * Size cap for `diff.md`, in UTF-8 bytes (`markdown-projection.md` §6.4). Absent writes the
+   * whole document, which is what a file on disk is for; a caller that posts the file as a
+   * GitHub comment has to pass one, because the API rejects a body over 65536 bytes outright.
+   */
+  maxBytes?: number
   /** Injected git runner for tests. Defaults to a real `git` child process. */
   git?: GitRunner
   /** Non-fatal warning sink (defaults to `process.stderr.write`). */
@@ -161,6 +167,18 @@ export async function runDiff(options: DiffOptions): Promise<DiffReport> {
   const cwd = options.cwd ?? process.cwd()
   const warn = options.warn ?? ((m: string) => process.stderr.write(`${m}\n`))
   const failOn = options.failOn === undefined ? [] : parseFailOn(options.failOn)
+  // Checked here rather than left to `projectDiff`, which raises a `RangeError`: a bad flag is
+  // an input error (exit 2) in this command's table, and it is checked before the scans so a
+  // typo costs a message instead of two full extractions.
+  if (
+    options.maxBytes !== undefined &&
+    (!Number.isInteger(options.maxBytes) || options.maxBytes <= 0)
+  ) {
+    throw new CliError(
+      `--max-bytes must be a positive integer (got ${String(options.maxBytes)}).`,
+      "input-error",
+    )
+  }
   // One pin for the whole command, and not one taken before something needs it.
   //
   // Eager would be simpler to read and wrong twice over: a `--base` / `--head` run that named
@@ -226,9 +244,33 @@ export async function runDiff(options: DiffOptions): Promise<DiffReport> {
     })
     await writeFile(diffJsonPath, serialized, "utf8")
   }
+  if (format === "json" && options.maxBytes !== undefined) {
+    // Not an input error: the action passes `--max-bytes` without consulting `--format`, so
+    // rejecting the pair would fail every `format: json` run of it. Said out loud all the same —
+    // a flag that is accepted, validated and then has nothing to act on is one a reader is
+    // entitled to hear about.
+    warn(
+      `⚠ --max-bytes has no effect under --format json: the cap applies to ${DIFF_MD_FILENAME}, which this run does not write.`,
+    )
+  }
   if (format !== "json") {
     diffMdPath = resolve(outputDir, DIFF_MD_FILENAME)
-    await writeFile(diffMdPath, projectDiff(diff), "utf8")
+    const markdown = projectDiff(
+      diff,
+      options.maxBytes === undefined ? {} : { maxBytes: options.maxBytes },
+    )
+    // The one case the projection cannot meet is a budget smaller than the title, the Summary
+    // line and the omission note together (`markdown-projection.md` §6.4). It says so in the
+    // document; this says so to the caller, who asked for a number and got a bigger one.
+    if (options.maxBytes !== undefined) {
+      const written = Buffer.byteLength(markdown, "utf8")
+      if (written > options.maxBytes) {
+        warn(
+          `⚠ ${DIFF_MD_FILENAME} is ${written} bytes, over the ${options.maxBytes} requested: every section was dropped and the title and summary alone exceed it. Raise --max-bytes.`,
+        )
+      }
+    }
+    await writeFile(diffMdPath, markdown, "utf8")
   }
 
   // §6.6, from `@aburi/markdown-projection` rather than from a local copy: the two were

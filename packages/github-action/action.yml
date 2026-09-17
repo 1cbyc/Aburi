@@ -64,6 +64,17 @@ inputs:
     description: "Upsert the produced Markdown as a PR comment. Set to `false` to run diff only."
     required: false
     default: "true"
+  max-bytes:
+    description: >-
+      Size cap for `diff.md`, in UTF-8 bytes, forwarded as `--max-bytes`. The report drops whole
+      sections least-important-first to meet it (`docs/design/markdown-projection.md` §6.4) rather
+      than being cut mid-block, and says at the top which sections went. Left empty it is 65507:
+      GitHub rejects a comment body over 65536 bytes with a 422, and the hidden marker takes the
+      other 29. It applies whether or not this run posts the comment itself, because the artefact
+      is what a `workflow_run` companion posts for a fork's pull request. Set to `0` for no cap;
+      `diff.json` is unabridged either way.
+    required: false
+    default: ""
   token:
     description: "GitHub token used to read PR comments and create/update the marker comment."
     required: false
@@ -107,6 +118,7 @@ runs:
         FORMAT: ${{ inputs.format }}
         COMMENT: ${{ inputs.comment }}
         CLI: ${{ inputs.cli }}
+        MAX_BYTES: ${{ inputs.max-bytes }}
       run: |
         set -euo pipefail
         if [ "$COMMENT" = "true" ] && [ "$FORMAT" = "json" ]; then
@@ -128,6 +140,14 @@ runs:
           true|false) : ;;
           *) echo "::error::comment must be true or false (got '$COMMENT')." >&2; exit 2 ;;
         esac
+        # `scripts/resolve-max-bytes.mjs` rejects the same values, and is where the rule is
+        # tested. Repeated here so a typo is caught before the toolchain is installed and, under
+        # `cli: dlx`, before a package is fetched — not because the later check might miss it.
+        # `0` is the documented "no cap" spelling, so it passes.
+        if [ -n "$MAX_BYTES" ] && ! printf '%s' "$MAX_BYTES" | grep -Eq '^(0|[1-9][0-9]*)$'; then
+          echo "::error::max-bytes must be a non-negative integer, or empty (got '$MAX_BYTES')." >&2
+          exit 2
+        fi
 
     - name: "Aburi: resolve refspec"
       id: refspec
@@ -181,6 +201,7 @@ runs:
         FAIL_ON: ${{ inputs.fail-on }}
         CONFIG: ${{ inputs.config }}
         CLI: ${{ inputs.cli }}
+        MAX_BYTES: ${{ inputs.max-bytes }}
       run: |
         set -euo pipefail
         args=(diff "$REFSPEC" --format "$FORMAT" --output-dir "$OUTPUT_DIR")
@@ -214,6 +235,35 @@ runs:
         else
           runner=(pnpm dlx "@aburi/cli@$VERSION")
         fi
+
+        # The size cap. 65536 is GitHub's comment-body limit and the upsert prepends a 29-byte
+        # marker line, which leaves 65507 for the report — the default the script below holds,
+        # against `ABURI_COMMENT_BODY_MAX_BYTES` in `src/comment.ts`. Applied even under
+        # `comment: false`, and deliberately: that is the mode a fork's pull request runs in,
+        # where the Markdown goes up as an artefact for the `workflow_run` companion to post
+        # (§5.1) — a file capped only when this job was the one posting would be rejected there
+        # instead, which is the same 422 on the one pull request whose author cannot see the
+        # companion's log. `diff.json` is uncapped, and so is `diff.md` under `max-bytes: 0`.
+        #
+        # A script rather than a branch here, for the reason the CLI resolver above is one: this
+        # decision has four outcomes and a subprocess in the middle of it, and a `run:` block
+        # cannot be tested. `test/resolve-max-bytes.test.ts` runs it.
+        #
+        # stderr is left alone so its `::warning::` annotations reach the log; only stdout, which
+        # carries the budget, is captured.
+        set +e
+        budget=$(node "$GITHUB_ACTION_PATH/scripts/resolve-max-bytes.mjs" "${runner[@]}")
+        budget_status=$?
+        set -e
+        if [ "$budget_status" != "0" ]; then
+          # Same shape as the resolver's failure above: the outputs are written before the exit,
+          # so a caller reading `cli-exit-code` gets the 2 this is rather than an empty string.
+          echo "diff-json-path=" >> "$GITHUB_OUTPUT"
+          echo "diff-md-path=" >> "$GITHUB_OUTPUT"
+          echo "cli-exit-code=2" >> "$GITHUB_OUTPUT"
+          exit 2
+        fi
+        if [ -n "$budget" ]; then args+=(--max-bytes "$budget"); fi
 
         set +e
         "${runner[@]}" "${args[@]}"
