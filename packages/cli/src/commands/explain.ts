@@ -13,6 +13,9 @@ import type { WarnFn } from "../warn"
 import { resolveWorkspaceRoot } from "../workspace-root"
 import { runScan } from "./scan"
 
+/** What this command's one artefact is called when a write of it fails. */
+const MARKDOWN_ARTEFACT = "the explain Markdown"
+
 export interface ExplainOptions {
   cwd?: string
   configPath?: string
@@ -126,7 +129,20 @@ export async function runExplain(options: ExplainOptions): Promise<ExplainOutcom
   const workspaceRoot = await resolveWorkspaceRoot(cwd)
   assertDebugResolutionCombination(options)
   const resolved = await readOrScanIR(cwd, workspaceRoot, options)
-  return withScanFault(await locate(resolved, cwd, workspaceRoot, options), resolved.scanFaulted)
+  const outcome = withScanFault(
+    await locate(resolved, cwd, workspaceRoot, options),
+    resolved.scanFaulted,
+  )
+  // The one place the Markdown is written, so `locate` stays the pure lookup its name says.
+  // Written even when the scan faulted: the outcome carries the answer, and the gate is about
+  // whether to trust it, not about whether the caller may read it.
+  if ("writtenTo" in outcome && outcome.writtenTo !== null) {
+    await writeOutputFile(
+      { command: "explain", artefact: MARKDOWN_ARTEFACT, path: outcome.writtenTo },
+      outcome.markdown,
+    )
+  }
+  return outcome
 }
 
 /**
@@ -169,7 +185,6 @@ async function locate(
     const hit = ir.symbols.find((s) => s.id === arg)
     if (hit !== undefined) {
       const markdown = projectSymbolExplain(hit, explainContext)
-      if (outputPath !== null) await writeOutputFile(outputPath, markdown)
       return {
         kind: "single",
         markdown,
@@ -229,7 +244,6 @@ async function locate(
       const inFile = ir.symbols.filter((s) => s.source.file === documentPath)
       if (inFile.length === 0) return missed(skipped, "path", coverage)
       const markdown = inFile.map((s) => projectSymbolExplain(s, explainContext)).join("\n---\n\n")
-      if (outputPath !== null) await writeOutputFile(outputPath, markdown)
       return {
         kind: "file",
         markdown,
@@ -248,7 +262,6 @@ async function locate(
   const only = matches[0]
   if (only === undefined) return { kind: "not-found", exitCode: EXIT.RUNTIME, coverage }
   const markdown = projectSymbolExplain(only, explainContext)
-  if (outputPath !== null) await writeOutputFile(outputPath, markdown)
   return {
     kind: "single",
     markdown,
@@ -389,6 +402,7 @@ async function readOrScanIR(
 
   const scanOptions: Parameters<typeof runScan>[0] = {
     cwd,
+    command: "explain",
     format: "json",
     ...(options.configPath === undefined ? {} : { configPath: options.configPath }),
     ...(options.warn === undefined ? {} : { incidents: { warn: options.warn } }),

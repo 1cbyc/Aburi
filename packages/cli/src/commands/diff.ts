@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { basename, resolve } from "node:path"
+import { basename, dirname, join, resolve } from "node:path"
 import { buildDiff, DiffError, type GitRenameMap, writeCanonicalDiff } from "@aburi/diff"
 import {
   formatCallResolutionLine,
@@ -14,9 +14,11 @@ import { configuredOutputDir, type PinnedConfig, pinConfig } from "../config-loa
 import { CliError, errorCode, errorMessage, internalFault, unplacedErrorCode } from "../errors"
 import { EXIT, type ExitCode } from "../exit-codes"
 import { evaluateFailOn, type FailOnClause, formatTriggered, parseFailOn } from "../fail-on"
+import { pathExists } from "../fs-probe"
 import { readGeneratorInfo } from "../generator-info"
 import { readIR } from "../ir-io"
 import { joinCapped } from "../listing"
+import { createOutputDir, writeOutputFile } from "../output-file"
 import type { WarnFn } from "../warn"
 import { resolveWorkspaceRoot } from "../workspace-root"
 import { runScan, type ScanReport } from "./scan"
@@ -164,12 +166,17 @@ export async function runDiff(options: DiffOptions): Promise<DiffReport> {
   // destination must not be stopped by a file it never consults. The per-side scans of a ref
   // diff read the config for their own reasons, and write to an explicit temp directory
   // either way, which is a flag by another name.
+  const inputs = chooseInputs(options)
   const outputDir = resolveOutputDir(
     cwd,
     options.outputDir,
     options.outputDir === undefined ? await configuredOutputDir(await pinConfigOnce()) : undefined,
   )
+  // And created now, for the same reason: a destination that cannot hold the report is
+  // refused before two scans are run for it.
+  await createOutputDir("diff", outputDir)
   const { baseIR, headIR, baseRef, headRef, gitRenames, scans } = await resolveIRs(
+    inputs,
     options,
     cwd,
     pinConfigOnce,
@@ -195,17 +202,31 @@ export async function runDiff(options: DiffOptions): Promise<DiffReport> {
     throw error
   }
 
-  await mkdir(outputDir, { recursive: true })
   const format = options.format ?? "both"
 
   let diffJsonPath: string | null = null
   let diffMdPath: string | null = null
   if (format !== "md") {
     diffJsonPath = resolve(outputDir, DIFF_JSON_FILENAME)
-    const serialized = writeCanonicalDiff(diff, {
-      format: options.compact ? "compact" : "pretty",
-    })
-    await writeFile(diffJsonPath, serialized, "utf8")
+    // The same split `aburi scan` makes for the IR: the serializer can refuse the document
+    // (two keys differing only in Unicode composition), which is a property of what was
+    // compared — exit 2, the path attached — while a disk refusing the bytes is the machine's.
+    let serialized: string
+    try {
+      serialized = writeCanonicalDiff(diff, {
+        format: options.compact ? "compact" : "pretty",
+      })
+    } catch (error) {
+      throw new CliError(
+        `Failed to serialize the diff for ${diffJsonPath}: ${errorMessage(error)}`,
+        "config-error",
+        { cause: error },
+      )
+    }
+    await writeOutputFile(
+      { command: "diff", artefact: "the diff JSON", path: diffJsonPath },
+      serialized,
+    )
   }
   if (format === "json" && options.maxBytes !== undefined) {
     // Not an input error: the action passes `--max-bytes` without consulting `--format`, so
@@ -233,7 +254,10 @@ export async function runDiff(options: DiffOptions): Promise<DiffReport> {
         )
       }
     }
-    await writeFile(diffMdPath, markdown, "utf8")
+    await writeOutputFile(
+      { command: "diff", artefact: "the diff Markdown", path: diffMdPath },
+      markdown,
+    )
   }
 
   // `cli-spec.md` stdout shape
@@ -521,12 +545,14 @@ interface ResolvedIRs {
   scans: ScanPair | null
 }
 
-async function resolveIRs(
-  options: DiffOptions,
-  cwd: string,
-  pinConfigOnce: () => Promise<PinnedConfig>,
-  warn: WarnFn,
-): Promise<ResolvedIRs> {
+/** Which of the two forms `cli-spec.md` gives this command was asked for. */
+type DiffInputs = { kind: "refs"; spec: RefSpec } | { kind: "files"; base: string; head: string }
+
+/**
+ * The form the options spell, decided before anything touches the disk: a malformed spec or a
+ * half-given file pair is refused with nothing created for it.
+ */
+function chooseInputs(options: DiffOptions): DiffInputs {
   if (options.refSpec !== undefined && options.refSpec !== null && options.refSpec.length > 0) {
     if (options.base !== undefined && options.base !== null) {
       throw new CliError(
@@ -534,7 +560,7 @@ async function resolveIRs(
         "input-error",
       )
     }
-    return resolveViaGit(options, cwd, parseRefSpec(options.refSpec), pinConfigOnce, warn)
+    return { kind: "refs", spec: parseRefSpec(options.refSpec) }
   }
   if (options.base === undefined || options.base === null || options.base.length === 0) {
     throw new CliError(
@@ -545,13 +571,24 @@ async function resolveIRs(
   if (options.head === undefined || options.head === null || options.head.length === 0) {
     throw new CliError(`--base was supplied without a matching --head <ir.json>.`, "input-error")
   }
-  const baseIR = await readIR(resolve(cwd, options.base))
-  const headIR = await readIR(resolve(cwd, options.head))
+  return { kind: "files", base: options.base, head: options.head }
+}
+
+async function resolveIRs(
+  inputs: DiffInputs,
+  options: DiffOptions,
+  cwd: string,
+  pinConfigOnce: () => Promise<PinnedConfig>,
+  warn: WarnFn,
+): Promise<ResolvedIRs> {
+  if (inputs.kind === "refs") return resolveViaGit(options, cwd, inputs.spec, pinConfigOnce, warn)
+  const baseIR = await readIR(resolve(cwd, inputs.base))
+  const headIR = await readIR(resolve(cwd, inputs.head))
   return {
     baseIR,
     headIR,
-    baseRef: options.base,
-    headRef: options.head,
+    baseRef: inputs.base,
+    headRef: inputs.head,
     gitRenames: null,
     scans: null,
   }
@@ -704,6 +741,7 @@ async function runScanInDir(
 ): Promise<ScanReport> {
   const scanOptions: Parameters<typeof runScan>[0] = {
     cwd,
+    command: "diff",
     outputDir,
     format: "json",
     incidents: { warn, label: labelFor(target) },
@@ -715,11 +753,21 @@ async function runScanInDir(
 }
 
 /**
- * `git rev-parse --verify` fails distinguishably for two very different situations:
- *   1. `git` is not installed on the host (`ENOENT` spawn failure) — reporting this as
- *      "base ref not found" is a wrong-remediation nightmare in CI logs.
- *   2. `git` is installed but the ref cannot be resolved (bad name, shallow clone).
- * We split them so the user gets the correct next step for each.
+ * `git rev-parse --verify` fails distinguishably for a git that could not be started — the
+ * `ENOENT` spawn failure `isGitMissing` picks out, which is the machine's (exit 1) and would be
+ * a wrong-remediation nightmare in CI logs reported as "base ref not found" — and
+ * indistinguishably for everything else. Under exit 128, `Needed a single revision` is what git
+ * says for a ref that names nothing and for a repository with no commits alike, and a directory
+ * outside any repository is refused the same way as one git will not open. So once a ref has
+ * failed, the run asks git two more questions, and an *answer* to each is what becomes a
+ * diagnosis:
+ *   1. The directory is not inside a git repository. `git fetch` cannot help.
+ *   2. The repository has no commits yet, so no ref — not even `HEAD~1` — names a revision.
+ *   3. The ref cannot be resolved: a bad name, or a branch never fetched.
+ * All three are about what the reader named and where they ran the command, so they are input
+ * errors (exit 2, `cli-spec.md` §6.5). A question git does not answer ends the run at exit 1
+ * with git's own words, which are the one piece of evidence that survives a diagnosis being
+ * wrong — and every diagnosis carries them too, for the same reason.
  */
 async function assertRefResolvable(
   git: GitRunner,
@@ -737,12 +785,115 @@ async function assertRefResolvable(
         { cause: error },
       )
     }
-    const roleTag = role === "base" ? "Base" : "Head"
-    throw new CliError(
-      `${roleTag} ref '${ref}' could not be resolved. If this is a CI shallow clone, run: git fetch --deepen=50 origin ${ref}`,
+    throw await diagnoseUnresolvedRef(git, cwd, ref, role, error)
+  }
+}
+
+/**
+ * Which of the three reader-side reasons a ref did not resolve, as the error to throw — or,
+ * when git would not say, the failure itself.
+ *
+ * Asked only after a ref has failed, so a healthy run pays for no extra git calls. A probe git
+ * refuses answers `null` rather than a guess, because whatever refused the ref — dubious
+ * ownership of the repository, a directory removed under the run — is still in force when the
+ * probe runs, and reading its refusal as "not a repository" would replace git's precise report
+ * with a wrong one at the wrong exit code.
+ */
+async function diagnoseUnresolvedRef(
+  git: GitRunner,
+  cwd: string,
+  ref: string,
+  role: "base" | "head",
+  cause: unknown,
+): Promise<CliError> {
+  const prefix = `${role === "base" ? "Base" : "Head"} ref '${ref}' could not be resolved`
+  const said = errorMessage(cause).trim()
+  const outside = "Run aburi diff from inside one, or compare IR files with --base/--head."
+  const unanswered = (): CliError =>
+    new CliError(
+      `${prefix}, and git would not say why. What it reported: ${said}`,
       "runtime-error",
-      { cause: error },
+      { cause },
     )
+
+  const inside = await isInsideWorkTree(git, cwd)
+  if (inside === null) {
+    // Outside any repository the refusal is the expected one, and the filesystem can vouch
+    // for it: nothing git would open stands between `cwd` and the root. Anything standing
+    // there means the refusal was about that repository, and git's report says what.
+    if (await gitRepositoryAbove(cwd)) return unanswered()
+    return new CliError(
+      `${prefix}: ${cwd} is not inside a git repository. ${outside} (${said})`,
+      "input-error",
+      { cause },
+    )
+  }
+  if (!inside) {
+    return new CliError(
+      `${prefix}: ${cwd} is inside a git directory, not a working tree. ${outside} (${said})`,
+      "input-error",
+      { cause },
+    )
+  }
+  const commits = await hasCommits(git, cwd)
+  if (commits === null) return unanswered()
+  if (!commits) {
+    return new CliError(
+      `${prefix}: the repository at ${cwd} has no commits yet, so there is no revision to compare. (${said})`,
+      "input-error",
+      { cause },
+    )
+  }
+  return new CliError(
+    `${prefix}: no such revision in this repository. Check the spelling, or fetch the branch first. (${said})`,
+    "input-error",
+    { cause },
+  )
+}
+
+/**
+ * Whether `cwd` is inside a git working tree: `true` or `false` as git prints it (`false`
+ * from inside `.git` itself), `null` when git refused the question.
+ */
+async function isInsideWorkTree(git: GitRunner, cwd: string): Promise<boolean | null> {
+  try {
+    const { stdout } = await git.run(["rev-parse", "--is-inside-work-tree"], { cwd })
+    return stdout.trim() === "true"
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Whether any ref names a commit. `rev-list --all` prints nothing in a repository with no
+ * commits and exits 0, which `rev-parse --verify HEAD` does not distinguish from a bad name.
+ * `null` when git refused the question: "no commits" is a claim this must not make on no
+ * evidence, and neither is "no such revision".
+ */
+async function hasCommits(git: GitRunner, cwd: string): Promise<boolean | null> {
+  try {
+    const { stdout } = await git.run(["rev-list", "--all", "--max-count=1"], { cwd })
+    return stdout.trim().length > 0
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Whether anything git would open as a repository stands at `cwd` or above it: a `.git`
+ * directory, or the file a linked worktree keeps in its place. `GIT_DIR` names one outright,
+ * wherever it is, and is taken at its word. This walks what git's own discovery walks, minus
+ * the ceilings that only ever make git find *less* — so "nothing here" is a finding git would
+ * agree with, and "something here" merely hands the failure back to git's own report.
+ */
+async function gitRepositoryAbove(cwd: string): Promise<boolean> {
+  if (process.env.GIT_DIR !== undefined) return true
+  let directory = resolve(cwd)
+  for (;;) {
+    if (await pathExists(join(directory, ".git"))) return true
+    const parent = dirname(directory)
+    if (parent === directory) return false
+    directory = parent
   }
 }
 

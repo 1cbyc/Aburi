@@ -1,4 +1,3 @@
-import { mkdir, writeFile } from "node:fs/promises"
 import { dirname, resolve } from "node:path"
 import {
   type CollidingFile,
@@ -15,11 +14,11 @@ import {
   posixWorkspaceRelativeViolation,
   type SkippedFile,
   scan,
+  serializeCanonical,
   type TreeReleaseFailure,
   type UnnameableFile,
   type UnrepresentableFile,
   type UnresolvedDeclaration,
-  writeCanonicalIR,
 } from "@aburi/core"
 import {
   formatCallResolutionLine,
@@ -48,6 +47,7 @@ import { EXIT, type ExitCode } from "../exit-codes"
 import { readGeneratorInfo } from "../generator-info"
 import { capListing } from "../listing"
 import { createLogger } from "../logger"
+import { createOutputDir, type OutputCommand, writeOutputFile } from "../output-file"
 import { loadPlugins } from "../plugin-loader"
 import { describeUnresolvedDeclarations } from "../unresolved-report"
 import type { WarnFn } from "../warn"
@@ -55,6 +55,12 @@ import { resolveWorkspaceRoot } from "../workspace-root"
 
 export interface ScanOptions {
   cwd?: string
+  /**
+   * The command this scan runs under, which is what a failed write names: `aburi diff` runs
+   * two scans and `aburi explain` one, and a reader who typed either must not be told that
+   * `aburi scan` failed. Defaults to `"scan"`.
+   */
+  command?: OutputCommand
   configPath?: string
   /**
    * A config already decided by the caller, which supersedes both `configPath` and discovery.
@@ -232,32 +238,43 @@ export async function runScan(options: ScanOptions = {}): Promise<ScanReport> {
     generator: await readGeneratorInfo(),
     logger: createLogger(options.logLevel === undefined ? {} : { minimum: options.logLevel }),
   }
+  // Ahead of the scan: a destination that cannot hold the outputs is refused before the
+  // workspace is read for them.
+  const command = options.command ?? "scan"
+  const outputDir = resolveOutputDir(cwd, options.outputDir, config.output?.dir)
+  await createOutputDir(command, outputDir)
   const scanResult = await scan(scanInput)
 
   const format = options.format ?? "both"
-  const outputDir = resolveOutputDir(cwd, options.outputDir, config.output?.dir)
-  await mkdir(outputDir, { recursive: true })
 
   let irPath: string | null = null
-  const workspaceMdPath = await maybeWriteWorkspaceMd(format, outputDir, scanResult.ir, options)
-  const componentMdPaths = await maybeWriteComponentMd(format, outputDir, scanResult.ir)
+  const workspaceMdPath = await maybeWriteWorkspaceMd(
+    command,
+    format,
+    outputDir,
+    scanResult.ir,
+    options,
+  )
+  const componentMdPaths = await maybeWriteComponentMd(command, format, outputDir, scanResult.ir)
   if (format !== "md") {
     irPath = resolve(outputDir, IR_JSON_FILENAME)
     // Serialization can refuse the document (two keys differing only in Unicode composition),
-    // which is a property of the scanned project — exit 2, with the target path attached.
+    // which is a property of the scanned project — exit 2, with the target path attached. The
+    // write is a separate step so that a disk refusing the bytes is reported as what it is
+    // (exit 1, the command and the artefact named) rather than as a fault in the project.
+    let serialized: string
     try {
-      await writeCanonicalIR(scanResult.ir, irPath, {
+      serialized = serializeCanonical(scanResult.ir, {
         format: options.compact ? "compact" : "pretty",
       })
     } catch (error) {
       throw new CliError(
-        `Failed to write IR to ${irPath}: ${errorMessage(error)}`,
+        `Failed to serialize the IR for ${irPath}: ${errorMessage(error)}`,
         "config-error",
-        {
-          cause: error,
-        },
+        { cause: error },
       )
     }
+    await writeOutputFile({ command, artefact: "the IR", path: irPath }, serialized)
   }
 
   // A withdrawn file's parse errors are still reported — they are the account of why it was
@@ -859,6 +876,7 @@ const CONFIG_COMPONENT_ERROR_CODES: ReadonlySet<string> = new Set([
 ])
 
 async function maybeWriteWorkspaceMd(
+  command: OutputCommand,
   format: "json" | "md" | "both",
   outputDir: string,
   ir: IR,
@@ -869,18 +887,18 @@ async function maybeWriteWorkspaceMd(
   const md = projectWorkspace(ir, {
     suppressTimestamp: options.suppressTimestamp ?? false,
   })
-  await writeFile(path, md, "utf8")
+  await writeOutputFile({ command, artefact: "the workspace Markdown", path }, md)
   return path
 }
 
 async function maybeWriteComponentMd(
+  command: OutputCommand,
   format: "json" | "md" | "both",
   outputDir: string,
   ir: IR,
 ): Promise<string[]> {
   if (format === "json") return []
   const paths: string[] = []
-  await mkdir(resolve(outputDir, COMPONENTS_DIRNAME), { recursive: true })
   for (const component of ir.components) {
     const symbolsInComponent = ir.symbols.filter((symbol) => symbol.component === component.id)
     const md = projectComponent({
@@ -889,7 +907,10 @@ async function maybeWriteComponentMd(
       dependencies: ir.dependencies,
     })
     const path = resolve(outputDir, COMPONENTS_DIRNAME, `${component.id}.md`)
-    await writeFile(path, md, "utf8")
+    await writeOutputFile(
+      { command, artefact: `the Markdown for component "${component.id}"`, path },
+      md,
+    )
     paths.push(path)
   }
   return paths
