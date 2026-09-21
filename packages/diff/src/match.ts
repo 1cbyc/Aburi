@@ -1,7 +1,13 @@
 import { compareCodeUnit, groupBy, trySymbolId, ZERO_FINGERPRINT } from "@aburi/core"
 import type { Symbol as IRSymbol, MatchRationale, SymbolId } from "@aburi/types"
 import { signatureSimilarity } from "./signature"
-import { createNameScorer, lastSegment, type NameScorer, tokenizeName } from "./similarity"
+import {
+  createNameScorer,
+  lastSegment,
+  type NameScorer,
+  nameEvidence,
+  tokenizeName,
+} from "./similarity"
 
 /**
  * A concluded pairing of one base Symbol with one head Symbol, along with the
@@ -464,6 +470,13 @@ function memberTokens(qname: string): readonly string[] {
  * many tokens the head's last name segment has: 1 token → 1.0 (`0.5 + 0.3 + 0.2` is exactly
  * 1 in IEEE 754, reached on an identical member name and signature past a *compatible*
  * owner), 2 tokens → 0.95 (refuses `getUser` vs `getUsers`), otherwise 0.85.
+ *
+ * The token count, not `nameEvidence`, and deliberately: these rows are about how coarse a
+ * Jaccard over those tokens can be, and the bar rises to meet that. One token against a name
+ * of `n` scores 0 or `1/n`, so nothing short of an identical single token reaches 1.0 and the
+ * composite tops out at `0.5 × 0.5 + 0.3 + 0.2 = 0.75` below it — under every row. A name of
+ * one token really is all-or-nothing on its name axis, `ユーザー情報を取得する` included
+ * however much it says, and the first row is right about it.
  */
 const EXACT_MATCH_ONLY = 1
 const TWO_TOKEN_THRESHOLD = 0.95
@@ -486,21 +499,23 @@ function thresholdFor(qname: string): number {
 /**
  * Whether a Symbol's qualified name says enough for stage 4 to read it at all.
  *
- * A name of one distinct token — `main`, or `Main.main` after dedup — scores the full 1.0
- * against any other with the same signature, and 1.0 is the top of the scale, so no threshold
- * can refuse two unrelated CLI entry points reported as one move. Being unpairable is a
- * property of the name, decided here rather than by the score. Counted over the whole
- * qualified name, because that is what the score reads: `UserRepo.get` supplies three tokens
- * and pairs, though `thresholdFor` measures its last segment as one. Read off both sides,
- * because the property belongs to a pairing (`Main.main` clears the owner gate against
- * `Mains.main` on an identical member name).
+ * A name saying one thing — `main`, or `Main.main` after dedup — scores the full 1.0 against
+ * any other with the same signature, and 1.0 is the top of the scale, so no threshold can
+ * refuse two unrelated CLI entry points reported as one move. Being unpairable is a property
+ * of the name, decided here rather than by the score. Measured over the whole qualified name,
+ * because that is what the score reads: `UserRepo.get` says three things and pairs, though
+ * `thresholdFor` measures its last segment as one. Read off both sides, because the property
+ * belongs to a pairing (`Main.main` clears the owner gate against `Mains.main` on an
+ * identical member name).
  *
- * `tokenizeName` splits on ASCII case boundaries, so `ユーザー情報を取得する` is refused on
- * the same footing as `main`; the cost is a stage-4 move this stage will not find, and the
- * fix is nameSimilarity's to make.
+ * `nameEvidence` rather than the token count, which agree on a name whose words the tokeniser
+ * can find and part company on a run it cannot segment: `ユーザー情報を取得する` is one token,
+ * and a floor on the words in its runs puts it well past one, so two unrelated Symbols no more
+ * carry it by coincidence than they carry `getUserInformation`. What it buys such a name is
+ * narrower than this rule, since `thresholdFor` still reads one token and asks the full 1.0.
  */
 function saysEnoughToPair(qname: string): boolean {
-  return tokenizeName(qname).length > 1
+  return nameEvidence(qname) > 1
 }
 
 /**
