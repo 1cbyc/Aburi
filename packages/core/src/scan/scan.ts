@@ -10,6 +10,7 @@ import type {
   FrameworkPlugin,
   ImportEdge,
   IR,
+  Symbol as IRSymbol,
   LanguagePlugin,
   Logger,
   LspEnrichmentStats,
@@ -27,6 +28,7 @@ import { serializeCanonical } from "../canonical"
 import { countBy } from "../collections"
 import { CoreError } from "../errors"
 import { logicFingerprint } from "../fingerprint"
+import { symbolIdFile } from "../id"
 import { assertIRIntegrity } from "../integrity"
 import { silentLogger } from "../logger"
 import { enrichWithLsp, type ReadFile, type ServerFactory, withHintUsage } from "../lsp"
@@ -120,7 +122,9 @@ export interface ScanResult {
    */
   unresolvedCalls: readonly UnresolvedCallDiagnostic[]
   /**
-   * One record per file withdrawn because a plugin threw while extracting it, in scan order.
+   * One record per file withdrawn during extraction, in scan order: a plugin threw, or the
+   * file's Symbols could not enter the Document (§7.2 — `code: "duplicate-symbol-id"`, the
+   * one entry here nothing raised an error for).
    * These files also appear in `skipped` under `reason: "extraction-failed"`, which is what
    * a reader wanting the count consults; this carries the message beside it, the way
    * `parseTimeouts` carries the numbers `skipped` has nowhere to put.
@@ -163,18 +167,28 @@ export interface ScanResult {
 }
 
 /**
- * A file the scan withdrew because extracting it threw.
+ * A file the scan withdrew during extraction, whether a plugin threw or its Symbols could not
+ * enter the Document. The list means one thing about every entry: the file is gone and the run
+ * is not green. How it was lost is what `code` is for.
  *
- * `message` is the thrown error's message, or the value stringified when a plugin threw
- * something that was not an `Error`. There is no stack: the caller needs to know which file
- * to look at and what the plugin said about it, and a stack across a dynamically loaded
- * plugin boundary points at the plugin's own dist rather than at anything actionable.
+ * `message` is the plugin's account of the file. For a thrown fault that is the error's
+ * message, or the value stringified when what was thrown was not an `Error`; for
+ * `duplicate-symbol-id` it is the description of the fault. There is no stack either way: the
+ * caller needs to know which file to look at and what was wrong with it, and a stack across a
+ * dynamically loaded plugin boundary points at the plugin's own dist rather than at anything
+ * actionable.
  *
- * `code` is the thrown error's own code when it carries one, and absent otherwise. It is
- * what separates "this source is something the plugins cannot express" — a coded
+ * `code` names the fault when one is known, and is absent otherwise. It is what separates
+ * "this source is something the plugins cannot express" — a coded
  * `anonymous-symbol-id-attempted`, which a reader can act on by changing the source — from a
  * plugin that crashed, which they can only report. Matching on the message text is the
  * alternative, and it is not one.
+ *
+ * A present `code` does **not** mean the file was lost to a throw. Most codes here are a
+ * thrown error's own, but `duplicate-symbol-id` is not thrown at all: the pipeline ran to
+ * completion and the file's Symbols then could not satisfy ir-schema.md invariant #1
+ * under `code: "duplicate-symbol-id"`. A caller that branches on `code` sees both alike,
+ * which is the point; a caller needing to know how the file was lost reads the code itself.
  */
 export interface ExtractionFailure {
   file: string
@@ -382,6 +396,42 @@ export async function scan(input: ScanInput): Promise<ScanResult> {
         break
       }
       case "extracted": {
+        // Invariant #1, where the file can still be withdrawn and named. Ahead of every
+        // accumulator below, so a refusal leaves nothing half-written — the same property the
+        // exception boundary above gets from `runFilePipeline` returning its result at once.
+        //
+        // `discoveredFile.path` rather than `result.path`: the two are one value —
+        // `loadSourceFile` copies it and `FileOutcomeCommon` carries it back — and this whole
+        // branch is about paths that do not agree, so reading the file's path from two places
+        // would put the reader to work proving they are not one of them.
+        const collision = describeIdFault(result.symbols, discoveredFile.path)
+        if (collision !== null) {
+          additionalSkipped.push({
+            path: discoveredFile.path,
+            reason: "extraction-failed",
+            detail: collision,
+          })
+          extractionFailures.push({
+            file: discoveredFile.path,
+            message: collision,
+            code: "duplicate-symbol-id",
+          })
+          logger.warn(`Skipped ${discoveredFile.path}: ${collision}`)
+          // What this file observed on its way here still happened, and is kept on the same
+          // terms the `parse-failed` branch keeps it: the timeouts were measured by a pipeline
+          // that ran to completion, so dropping them would under-report
+          // `stats.effectClassifyTimeouts` for work the run really did; and the import edges
+          // are what the outcome is documented to carry. Unlike the exception boundary above,
+          // which loses both because its result never materialized, this branch has a result.
+          //
+          // The Symbols are the one thing that does not survive — they are the fault — and
+          // `fileContents` goes with them, since LSP enrichment only ever looks up a file that
+          // reached the IR.
+          timeoutEvents.push(...result.timeoutEvents)
+          importsByFile.set(discoveredFile.path, result.imports)
+          break
+        }
+
         // Held for LSP enrichment, and only for files that reached the IR. Nothing would
         // currently read a refused file's text if it were held — the pass builds one document
         // per file it has Symbols for, and a file that produced none is never looked up — so
@@ -553,6 +603,66 @@ function describeParseFailure(errors: readonly ParseError[]): string {
 
 function quote(error: ParseError): string {
   return `${error.line}:${error.column} — ${error.message}`
+}
+
+/**
+ * Why this file's Symbols cannot enter the document, or `null` when they can.
+ *
+ * `lang-plugin.md` §7.2 says one file's bug costs that file. Invariant #1 was the exception
+ * until it was decided here; the changeset that moved it has the account of why.
+ *
+ * Both faults are read off this file alone, which is what lets the message name the plugin
+ * that is actually wrong:
+ *
+ *   - An id whose path is not this file's, which `lang-plugin.md` §4.3 forbids: the id
+ *     contract is `<language>:<file>#<qualified-name>`, so the path segment is the plugin's
+ *     claim about where the Symbol was declared, and only a broken plugin writes another
+ *     file's. Checked first because it is the fault that can collide with a *different*
+ *     file's ids, and the offender is the file being scanned rather than whichever file
+ *     happens to own the id already (LP28c).
+ *   - Two of this file's own Symbols under one id. The shape that actually happens, because
+ *     an id carries the file it came from, so a collision is normally within one file's
+ *     candidates.
+ *
+ * With the first rule in force, two files cannot contribute one id at all: every id that
+ * enters carries its own file's path, discovery collapses two spellings of one Document path
+ * before either is read, and a routed file goes to exactly one plugin. So there is nothing
+ * left for a cross-file check to catch, and `assertIRIntegrity` goes back to being the
+ * backstop — for a document this scan did not build, which is the only way invariant #1 can
+ * still be violated.
+ *
+ * A malformed id is deliberately not this function's business: `symbolIdFile` answers `null`
+ * for one, and reporting it here would describe a grammar fault as a path fault. The grammar
+ * check keeps it.
+ *
+ * Which of two colliding Symbols to keep is not core's to decide — they are the plugin's
+ * output and it has said nothing that separates them — and picking one silently is the
+ * failure this was always about. So the file goes, whole, and the message names the fault.
+ */
+function describeIdFault(symbols: readonly IRSymbol[], path: string): string | null {
+  const here = new Map<string, IRSymbol>()
+  for (const symbol of symbols) {
+    const claimed = symbolIdFile(symbol.id)
+    if (claimed !== null && claimed !== path) {
+      return (
+        `Symbol id "${symbol.id}" names ${claimed}, which is not this file. An id carries the ` +
+        `file its Symbol was declared in, so the language plugin wrote a path that is not ` +
+        `this file's`
+      )
+    }
+    const twin = here.get(symbol.id)
+    if (twin !== undefined) {
+      // The lines, because the id names the qualified name the two share and nothing else
+      // tells them apart — the reader has two declarations to find, not one.
+      return (
+        `two Symbols share the id "${symbol.id}" (lines ${twin.source.startLine} and ` +
+        `${symbol.source.startLine}); the language plugin gave two declarations one qualified ` +
+        `name, and nothing it reported separates them`
+      )
+    }
+    here.set(symbol.id, symbol)
+  }
+  return null
 }
 
 /**
