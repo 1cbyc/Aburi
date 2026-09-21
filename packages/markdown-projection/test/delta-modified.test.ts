@@ -103,7 +103,7 @@ describe("rules / effects / calls — modified bucket", () => {
               target: "prisma.user.create",
               plugin: "effects-prisma",
               confidence: "high",
-              derivedBy: "propagation:call-graph",
+              derivedBy: "effects-plugin:prisma:write",
               propagated: true,
               derivedFrom: ["ts:src/repository.ts#Repository.save"],
             },

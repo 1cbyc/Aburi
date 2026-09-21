@@ -229,7 +229,6 @@ describe("Effects delta (I2)", () => {
     const h = makeSymbol({
       ...baseSym,
       effects: [propagatedEffect("ts:src/repository.ts#Repository.save")],
-      fingerprint: { ...shared, logic: "logic-changed" },
     })
     const delta = computeSymbolDelta(baseSym, h)
     expect(delta.effects?.modified).toEqual(h.effects)
@@ -240,7 +239,6 @@ describe("Effects delta (I2)", () => {
     const h = makeSymbol({
       ...baseSym,
       effects: [propagatedEffect("ts:src/b.ts#b")],
-      fingerprint: { ...shared, logic: "logic-changed" },
     })
     const delta = computeSymbolDelta(b, h)
     expect(delta.effects?.modified).toEqual(h.effects)

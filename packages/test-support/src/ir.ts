@@ -145,6 +145,9 @@ export function effect(
     derivedFrom?: string[]
   },
 ): Effect {
+  if (overrides.propagated === true && overrides.line !== undefined) {
+    throw new Error("propagated effect fixtures must omit line")
+  }
   const base: Effect = {
     id: overrides.id,
     target: overrides.target,

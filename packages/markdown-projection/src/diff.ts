@@ -21,6 +21,7 @@ import {
   compareStrings,
   inlineCode,
   isSymbolEdge,
+  propagatedFromSuffix,
   renderDocument,
   requireDropReason,
 } from "./format"
@@ -504,7 +505,8 @@ function asEffectLike(value: unknown): EffectLike | null {
   if (propagated !== undefined && typeof propagated !== "boolean") return null
   if (
     derivedFrom !== undefined &&
-    (!Array.isArray(derivedFrom) || !derivedFrom.every((source) => typeof source === "string"))
+    (!Array.isArray(derivedFrom) ||
+      !derivedFrom.every((source): source is string => typeof source === "string"))
   ) {
     return null
   }
@@ -513,7 +515,7 @@ function asEffectLike(value: unknown): EffectLike | null {
     target,
     line,
     propagated,
-    derivedFrom: derivedFrom as string[] | undefined,
+    derivedFrom,
   }
 }
 
@@ -541,7 +543,7 @@ function describeEffectLike(value: unknown): string | null {
   const eff = asEffectLike(value)
   if (eff === null) return null
   if (eff.propagated === true) {
-    return `${eff.id}: ${inlineCode(eff.target)} [propagated from ${(eff.derivedFrom ?? []).join(", ")}]`
+    return `${eff.id}: ${inlineCode(eff.target)} ${propagatedFromSuffix(eff.derivedFrom ?? [])}`
   }
   if (eff.line === undefined) return null
   return `${eff.id}: ${inlineCode(eff.target)} (L${eff.line})`
