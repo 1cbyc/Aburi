@@ -1,4 +1,4 @@
-import { stringArraysEqual } from "@aburi/core"
+import { compareCodeUnit, stringArraysEqual } from "@aburi/core"
 import type {
   ArrayDelta,
   Call,
@@ -234,13 +234,18 @@ function diffEffects(base: readonly Effect[], head: readonly Effect[]): ArrayDel
 }
 
 function effectsEqual(a: Effect, b: Effect): boolean {
+  // `line` is position rather than content; `derivedBy` is plugin-issued evidence text whose
+  // wording may change independently of the effect identity already carried by `plugin`.
   return (
     a.id === b.id &&
     a.target === b.target &&
     a.plugin === b.plugin &&
     a.confidence === b.confidence &&
     (a.propagated ?? false) === (b.propagated ?? false) &&
-    stringArraysEqual(a.derivedFrom ?? [], b.derivedFrom ?? [])
+    stringArraysEqual(
+      [...(a.derivedFrom ?? [])].sort(compareCodeUnit),
+      [...(b.derivedFrom ?? [])].sort(compareCodeUnit),
+    )
   )
 }
 

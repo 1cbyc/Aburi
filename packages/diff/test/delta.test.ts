@@ -1,15 +1,4 @@
-import {
-  call,
-  decorator,
-  effect,
-  fp,
-  makeIR,
-  makeSymbol,
-  sig,
-  symbolId,
-  zeroFp,
-} from "@aburi/test-support"
-import type { Effect } from "@aburi/types"
+import { call, decorator, effect, fp, makeIR, makeSymbol, sig, zeroFp } from "@aburi/test-support"
 import { describe, expect, it } from "vitest"
 import { buildDiff, classifyStatus, computeSymbolDelta, dropDirection } from "../src"
 
@@ -176,15 +165,14 @@ describe("Decorator delta (I1)", () => {
 
 describe("Effects delta (I2)", () => {
   const shared = fp("v1")
-  const propagatedEffect = (source: string): Effect => ({
-    id: "db.write",
-    target: "prisma.user.create",
-    plugin: "effects-prisma",
-    confidence: "high",
-    derivedBy: "convention:test",
-    propagated: true,
-    derivedFrom: [symbolId(source)],
-  })
+  const propagatedEffect = (source: string) =>
+    effect({
+      id: "db.write",
+      target: "prisma.user.create",
+      plugin: "effects-prisma",
+      propagated: true,
+      derivedFrom: [source],
+    })
   const baseSym = makeSymbol({
     id: "ts:src/a.ts#Foo",
     name: "Foo",
@@ -256,6 +244,35 @@ describe("Effects delta (I2)", () => {
     })
     const delta = computeSymbolDelta(b, h)
     expect(delta.effects?.modified).toEqual(h.effects)
+  })
+
+  it("treats a propagated effect's direct sources as a set", () => {
+    const b = makeSymbol({
+      ...baseSym,
+      effects: [
+        effect({
+          id: "db.write",
+          target: "prisma.user.create",
+          plugin: "effects-prisma",
+          propagated: true,
+          derivedFrom: ["ts:src/a.ts#a", "ts:src/b.ts#b"],
+        }),
+      ],
+    })
+    const h = makeSymbol({
+      ...b,
+      effects: [
+        effect({
+          id: "db.write",
+          target: "prisma.user.create",
+          plugin: "effects-prisma",
+          propagated: true,
+          derivedFrom: ["ts:src/b.ts#b", "ts:src/a.ts#a"],
+        }),
+      ],
+    })
+    const delta = computeSymbolDelta(b, h)
+    expect(delta.effects?.modified).toHaveLength(0)
   })
 
   it("treats an omitted propagated flag like explicit false", () => {

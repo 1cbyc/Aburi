@@ -148,11 +148,11 @@ export function effect(
   const base: Effect = {
     id: overrides.id,
     target: overrides.target,
-    line: overrides.line ?? 1,
     plugin: overrides.plugin,
     confidence: overrides.confidence ?? "high",
     derivedBy: overrides.derivedBy ?? "convention:test",
   }
+  if (overrides.propagated !== true) base.line = overrides.line ?? 1
   if (overrides.propagated !== undefined) base.propagated = overrides.propagated
   if (overrides.derivedFrom !== undefined) base.derivedFrom = overrides.derivedFrom.map(symbolId)
   return base
