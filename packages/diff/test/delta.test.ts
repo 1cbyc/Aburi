@@ -1,4 +1,15 @@
-import { call, decorator, effect, fp, makeIR, makeSymbol, sig, zeroFp } from "@aburi/test-support"
+import {
+  call,
+  decorator,
+  effect,
+  fp,
+  makeIR,
+  makeSymbol,
+  sig,
+  symbolId,
+  zeroFp,
+} from "@aburi/test-support"
+import type { Effect } from "@aburi/types"
 import { describe, expect, it } from "vitest"
 import { buildDiff, classifyStatus, computeSymbolDelta, dropDirection } from "../src"
 
@@ -165,6 +176,15 @@ describe("Decorator delta (I1)", () => {
 
 describe("Effects delta (I2)", () => {
   const shared = fp("v1")
+  const propagatedEffect = (source: string): Effect => ({
+    id: "db.write",
+    target: "prisma.user.create",
+    plugin: "effects-prisma",
+    confidence: "high",
+    derivedBy: "convention:test",
+    propagated: true,
+    derivedFrom: [symbolId(source)],
+  })
   const baseSym = makeSymbol({
     id: "ts:src/a.ts#Foo",
     name: "Foo",
@@ -214,6 +234,44 @@ describe("Effects delta (I2)", () => {
     const delta = computeSymbolDelta(baseSym, h, { lineFuzz: 0 })
     expect(delta.effects?.added).toHaveLength(0)
     expect(delta.effects?.removed).toHaveLength(0)
+    expect(delta.effects?.modified).toHaveLength(0)
+  })
+
+  it("emits modified when an effect changes from local to propagated", () => {
+    const h = makeSymbol({
+      ...baseSym,
+      effects: [propagatedEffect("ts:src/repository.ts#Repository.save")],
+      fingerprint: { ...shared, logic: "logic-changed" },
+    })
+    const delta = computeSymbolDelta(baseSym, h)
+    expect(delta.effects?.modified).toEqual(h.effects)
+  })
+
+  it("emits modified when a propagated effect's direct source changes", () => {
+    const b = makeSymbol({ ...baseSym, effects: [propagatedEffect("ts:src/a.ts#a")] })
+    const h = makeSymbol({
+      ...baseSym,
+      effects: [propagatedEffect("ts:src/b.ts#b")],
+      fingerprint: { ...shared, logic: "logic-changed" },
+    })
+    const delta = computeSymbolDelta(b, h)
+    expect(delta.effects?.modified).toEqual(h.effects)
+  })
+
+  it("treats an omitted propagated flag like explicit false", () => {
+    const h = makeSymbol({
+      ...baseSym,
+      effects: [
+        effect({
+          id: "db.write",
+          target: "prisma.user.create",
+          plugin: "effects-prisma",
+          line: 10,
+          propagated: false,
+        }),
+      ],
+    })
+    const delta = computeSymbolDelta(baseSym, h)
     expect(delta.effects?.modified).toHaveLength(0)
   })
 

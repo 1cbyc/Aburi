@@ -235,7 +235,12 @@ function diffEffects(base: readonly Effect[], head: readonly Effect[]): ArrayDel
 
 function effectsEqual(a: Effect, b: Effect): boolean {
   return (
-    a.id === b.id && a.target === b.target && a.plugin === b.plugin && a.confidence === b.confidence
+    a.id === b.id &&
+    a.target === b.target &&
+    a.plugin === b.plugin &&
+    a.confidence === b.confidence &&
+    (a.propagated ?? false) === (b.propagated ?? false) &&
+    stringArraysEqual(a.derivedFrom ?? [], b.derivedFrom ?? [])
   )
 }
 
